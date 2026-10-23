@@ -1,0 +1,9 @@
+{
+  "source": "https://raw.githubusercontent.com/SamratSahoo/cuTAMP/3a2e4d000339f7460f1989bde84d32b328ac92f9/cutamp/posture_ref.npz",
+  "source_commit": "3a2e4d000339f7460f1989bde84d32b328ac92f9",
+  "source_sha256": "f29cdecea3f0e24dd3b49ae1b889e85047aad2f5d9b376d39e959e8499e3c4e5",
+  "reference": "droid:droid_full_proprio robot=fr3_franka 4000 episodes, 987631 non-idle frames",
+  "license": "NVIDIA License; see CUTAMP-LICENSE.txt",
+  "conversion": "Lossless numeric GMM extraction; no refitting",
+  "converted_sha256": "3252f89dfb3a675d726ff6ef5fee3371244da6969d11a5bb7611425bebcf54e0"
+}

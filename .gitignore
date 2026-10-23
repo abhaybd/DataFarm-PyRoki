@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+dist/
+work/
+*.egg-info/
+
+# Checkpoints/motion arrays are local or distributed through an artifact host.
+*.npz
+*.npy
+*.pt
+*.pth
+*.safetensors

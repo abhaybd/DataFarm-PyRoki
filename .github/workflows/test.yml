@@ -1,0 +1,15 @@
+name: Tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen --extra planning
+      - run: uv run --frozen ruff check .
+      - run: uv run --frozen ruff format --check .
+      # Model binaries are never committed. Reproduce the pinned artifacts for parity tests.
+      - run: uv run --frozen python scripts/convert_checkpoint.py
+      - run: uv run --frozen python scripts/convert_joint_prior.py
+      - run: uv run --frozen --extra planning pytest

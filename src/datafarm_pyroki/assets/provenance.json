@@ -1,0 +1,46 @@
+{
+  "model_name": "droid-franka",
+  "joint_names": [
+    "joint1",
+    "joint2",
+    "joint3",
+    "joint4",
+    "joint5",
+    "joint6",
+    "joint7"
+  ],
+  "sample_rate_hz": 15.0,
+  "source_repository": "https://github.com/SamratSahoo/DATAFARM",
+  "source_commit": "fd403ea6eb16163261a13439fe9bbc10a980f50d",
+  "source_checkpoint": "https://raw.githubusercontent.com/SamratSahoo/DATAFARM/fd403ea6eb16163261a13439fe9bbc10a980f50d/encoder/checkpoints/encoder.pt",
+  "source_checkpoint_sha256": "e31ef96b6ffc0af8ce890e8774b9b57d3fa6e91c48ba9125d1e3574219c30c5b",
+  "converted_checkpoint_sha256": "ed6296980f448704c92e88cc91e9767a7dd4b758e82b93b80adc80178ee825a9",
+  "source_model": "https://github.com/SamratSahoo/DATAFARM/blob/fd403ea6eb16163261a13439fe9bbc10a980f50d/encoder/model.py",
+  "license": "MIT; Copyright (c) 2026 Samrat Sahoo; see DATAFARM-LICENSE.txt",
+  "conversion": "Lossless extraction of state_dict tensors and reference statistics to NPZ",
+  "training_metadata": {
+    "dataset": "lerobot/droid_1.0.1",
+    "dataset_codebase_version": "v3.0",
+    "train_protocol": "full DROID lerobot/droid_1.0.1 (v3.0); fingerprint regression + Fisher discriminant (within/between latent scatter) on balanced DROID/cuTAMP batches; encoder on a DROID subsample + cuTAMP, val-selected by held-out pair-silhouette; cluster stats over ALL episodes",
+    "n_droid_train": 30000,
+    "n_droid_stats": 94774,
+    "stats_max_segments": 120000,
+    "hparams": {
+      "d": 16,
+      "beta_max": 0.005,
+      "dropout": 0.3,
+      "disc_w": 1.0,
+      "batch": 128,
+      "n_crops_d": 6,
+      "n_crops_c": 16,
+      "balanced": true
+    },
+    "metrics": {
+      "val_pair_silhouette": 0.8552306294441223,
+      "val_probe": 1.0,
+      "selected_epoch": 50
+    },
+    "kl_droid_mean": 17.193614959716797,
+    "maha2_droid_mean": 7.039307359411732
+  }
+}
