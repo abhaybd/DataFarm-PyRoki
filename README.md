@@ -209,6 +209,9 @@ This optimizes duration and speed-profile shape on a fixed geometric curve,
 scoring at the model's training rate with differentiable duration masks. Defaults
 are 64 clock knots, 16 simultaneous starts and 500 Adam steps. Motion limits apply
 to every robot coordinate, including coordinates outside the encoder mapping.
+The default monotone C2 clock and explicit profile, duration, acceleration and
+jerk penalties regularize the learned style objective. See [retiming settings](docs/retiming.md)
+for weights, units and geometry requirements.
 Returned `dt` is the actual uniform timestep, approximately `output_dt`.
 
 For a plan with several legs and gripper actions, let the helper form the strokes:

@@ -40,6 +40,25 @@ def test_baseline_clock_preserves_gripper_events_and_holds(demo):
     np.testing.assert_allclose(q[hold], np.broadcast_to(goal, q[hold].shape))
 
 
+def test_baseline_flows_through_leg_joins_and_eases_only_at_stroke_ends(demo):
+    from datafarm_pyroki import MotionLeg
+
+    home = demo.HOME.copy()
+    delta = np.array([0.1, 0, 0, 0, 0, 0, 0])
+    steps = [
+        MotionLeg(np.linspace(home, home + delta, 6), 0.1),
+        MotionLeg(np.linspace(home + delta, home + 2 * delta, 6), 0.1),
+    ]
+    q, times, events = demo.baseline_timeline(steps)
+    assert events == []
+    velocity = np.diff(q[:, 0]) / np.diff(times)
+    assert np.all(velocity > 0)
+    middle = np.searchsorted(times, 0.5)
+    assert min(velocity[middle - 1 : middle + 1]) > 0.15
+    assert velocity[0] < 0.1 and velocity[-1] < 0.1
+    np.testing.assert_allclose(q[middle], home + delta)
+
+
 def test_mujoco_pyroki_kinematics_and_free_cubes(demo, tmp_path):
     import jax.numpy as jnp
     import pyroki as pk

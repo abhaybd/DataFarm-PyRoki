@@ -26,9 +26,16 @@ class RetimeConfig:
     starts: int = 16
     iterations: int = 500
     profile_rail: float = 1.0
-    profile_learning_rate: float = 0.08
-    duration_learning_rate: float = 0.0375  # fraction of allowed span range per Adam step
+    profile_learning_rate: float = 0.02
+    duration_learning_rate: float = 0.005  # fraction of allowed span range per Adam step
     boundary_weight: float = 50.0
+    clock_interpolation: str = "quintic"
+    profile_smoothness_weight: float = 0.1
+    profile_deviation_weight: float = 0.5
+    duration_weight: float = 2.0  # duration / original duration
+    acceleration_weight: float = 0.1  # mean squared robot-coordinate acceleration
+    jerk_weight: float = 0.01  # mean squared robot-coordinate jerk
+    regularization_rate_hz: float = 50.0
     min_duration: float = 0.8
     max_duration: float = 20.0
     min_duration_multiplier: float = 0.2
@@ -49,6 +56,7 @@ class RetimeConfig:
             self.max_duration,
             self.min_duration_multiplier,
             self.max_duration_multiplier,
+            self.regularization_rate_hz,
         )
         if not all(np.isfinite(x) and x > 0 for x in positive):
             raise ValueError(
@@ -58,8 +66,19 @@ class RetimeConfig:
             raise ValueError("max_duration must be at least min_duration")
         if self.min_duration_multiplier > self.max_duration_multiplier:
             raise ValueError("Duration multipliers must be ordered")
-        if not all(np.isfinite(x) and x >= 0 for x in (self.boundary_weight, self.smoothing)):
-            raise ValueError("boundary_weight and smoothing must be nonnegative and finite")
+        if self.clock_interpolation not in ("linear", "quintic"):
+            raise ValueError("clock_interpolation must be linear or quintic")
+        weights = (
+            self.boundary_weight,
+            self.smoothing,
+            self.profile_smoothness_weight,
+            self.profile_deviation_weight,
+            self.duration_weight,
+            self.acceleration_weight,
+            self.jerk_weight,
+        )
+        if not all(np.isfinite(x) and x >= 0 for x in weights):
+            raise ValueError("Retiming weights and smoothing must be nonnegative and finite")
 
 
 class RetimingError(RuntimeError):
@@ -84,6 +103,8 @@ class RetimedStroke:
     clock: np.ndarray  # normalized arrival times at uniformly spaced arc-fraction knots
     lead_speed: float
     trail_speed: float
+    regularization_cost: float = 0.0
+    motion_cost: float = 0.0
 
 
 def clock_knots(theta: jax.Array, rail: float = 1.0) -> jax.Array:
@@ -93,14 +114,89 @@ def clock_knots(theta: jax.Array, rail: float = 1.0) -> jax.Array:
     return tau.at[:, -1].set(1.0)
 
 
-def sample_clock(tau: jax.Array, time_fraction: jax.Array) -> jax.Array:
-    """Interpolate time -> path progress; piecewise differentiable in both inputs."""
+def sample_clock(
+    tau: jax.Array,
+    time_fraction: jax.Array,
+    *,
+    interpolation: str = "linear",
+    rest_start: bool = False,
+    rest_end: bool = False,
+) -> jax.Array:
+    """Monotone time -> progress, optionally C2 with zero speed at requested ends.
+
+    Quintic Bezier control points use shared knot slopes and zero second
+    derivatives. Slopes bounded by adjacent secants keep the control polygon
+    monotone, so smoothing cannot reverse motion or overshoot the path endpoints.
+    """
     k = tau.shape[-1]
     index = jnp.clip((time_fraction[..., None] >= tau[:, None, :-1]).sum(-1) - 1, 0, k - 2)
     left = jnp.take_along_axis(tau, index, axis=1)
     right = jnp.take_along_axis(tau, index + 1, axis=1)
     fraction = jnp.clip((time_fraction - left) / jnp.maximum(right - left, 1e-9), 0, 1)
-    return (index + fraction) / (k - 1)
+    if interpolation == "linear":
+        return (index + fraction) / (k - 1)
+    secants = 1 / ((k - 1) * jnp.maximum(jnp.diff(tau, axis=-1), 1e-9))
+    slopes = jnp.concatenate(
+        (secants[:, :1], jnp.minimum(secants[:, :-1], secants[:, 1:]), secants[:, -1:]), -1
+    )
+    if rest_start:
+        slopes = slopes.at[:, 0].set(0)
+    if rest_end:
+        slopes = slopes.at[:, -1].set(0)
+    d0 = jnp.take_along_axis(slopes, index, axis=1) * (right - left)
+    d1 = jnp.take_along_axis(slopes, index + 1, axis=1) * (right - left)
+    y0, y1 = index / (k - 1), (index + 1) / (k - 1)
+    control = jnp.stack((y0, y0 + d0 / 5, y0 + 2 * d0 / 5, y1 - 2 * d1 / 5, y1 - d1 / 5, y1), -1)
+    # de Casteljau evaluation is stable at knots and differentiable in the clock.
+    for _ in range(5):
+        control = (1 - fraction[..., None]) * control[..., :-1] + fraction[..., None] * control[
+            ..., 1:
+        ]
+    return control[..., 0]
+
+
+def timing_regularization(clock, span, reference_span, config):
+    """Dimensionless profile variation and elapsed-time costs, per candidate."""
+    log_shares = jnp.log(jnp.maximum(jnp.diff(clock, axis=-1), 1e-9))
+    centered = log_shares - jnp.mean(log_shares, axis=-1, keepdims=True)
+    # Scale the finite difference by profile resolution so changing resolution does not
+    # silently weaken the prior against rapid changes in local path speed.
+    roughness = jnp.mean((jnp.diff(log_shares, axis=-1) * (log_shares.shape[-1] - 1)) ** 2, -1)
+    deviation = jnp.mean(centered**2, -1)
+    return (
+        config.profile_smoothness_weight * roughness
+        + config.profile_deviation_weight * deviation
+        + config.duration_weight * span / reference_span
+    )
+
+
+def motion_regularization(
+    path, arc, clock, durations, *, n_frames, lead_speed, trail_speed, config
+):
+    """Physical acceleration/jerk costs in all robot coordinates, per candidate.
+
+    This fixed physical grid is independent of the trained encoder rate. A
+    prefix mask excludes difference stencils extending beyond the stroke.
+    """
+    rate = config.regularization_rate_hz
+    frames = jnp.arange(n_frames, dtype=path.dtype)
+    progress = sample_clock(
+        clock,
+        frames[None] / (durations[:, None] * rate),
+        interpolation=config.clock_interpolation,
+        rest_start=lead_speed == 0,
+        rest_end=trail_speed == 0,
+    )
+    q = sample_path(path, arc, progress)
+    cost = jnp.zeros_like(durations)
+    for order, weight in ((2, config.acceleration_weight), (3, config.jerk_weight)):
+        derivative = jnp.diff(q, n=order, axis=1) * rate**order
+        valid = jnp.clip(durations[:, None] * rate - frames[None, order:], 0, 1)
+        mean_square = (derivative**2 * valid[..., None]).sum((1, 2)) / jnp.maximum(
+            valid.sum(-1) * q.shape[-1], 1
+        )
+        cost = cost + weight * mean_square
+    return cost
 
 
 def sample_path(path: jax.Array, arc: jax.Array, progress: jax.Array) -> jax.Array:
@@ -134,7 +230,12 @@ def timing_objective(
     """
     frames = jnp.arange(n_frames, dtype=path.dtype)
     tau = clock_knots(theta, config.profile_rail)
-    progress = sample_clock(tau, frames[None] / span[:, None])
+    sampling = dict(
+        interpolation=config.clock_interpolation,
+        rest_start=lead_speed == 0,
+        rest_end=trail_speed == 0,
+    )
+    progress = sample_clock(tau, frames[None] / span[:, None], **sampling)
     q = sample_path(path, arc, progress)[..., jnp.asarray(joint_indices)]
     mask = jnp.clip(span[:, None, None] - frames[None, None], 0.0, 1.0)
     features = encoder.features_at_model_rate(q) * mask
@@ -143,7 +244,7 @@ def timing_objective(
     style = jnp.sum((dz @ encoder.precision_cholesky) ** 2, axis=-1)
     boundary = jnp.zeros_like(style)
     endpoint_frames = jnp.stack((jnp.zeros_like(span), jnp.ones_like(span), span - 1, span), -1)
-    endpoint_progress = sample_clock(tau, endpoint_frames / span[:, None])
+    endpoint_progress = sample_clock(tau, endpoint_frames / span[:, None], **sampling)
     endpoint_q = sample_path(path, arc, endpoint_progress)[..., jnp.asarray(joint_indices)]
     for a, b, speed in ((0, 1, lead_speed), (2, 3, trail_speed)):
         if speed > 0:
@@ -171,6 +272,7 @@ def _optimize(
     spans,
     lower_span,
     upper_span,
+    reference_span,
     target,
     *,
     joint_indices,
@@ -193,7 +295,28 @@ def _optimize(
             trail_speed=trail_speed,
             config=config,
         )
-        total = style + config.boundary_weight * boundary
+        regularization = timing_regularization(
+            clock_knots(params["theta"], config.profile_rail),
+            params["span"],
+            reference_span,
+            config,
+        )
+        regularization = regularization + motion_regularization(
+            path,
+            arc,
+            clock_knots(params["theta"], config.profile_rail),
+            params["span"] / encoder.spec.sample_rate_hz,
+            n_frames=int(
+                np.ceil(
+                    (n_frames - 8) / encoder.spec.sample_rate_hz * config.regularization_rate_hz
+                )
+            )
+            + 8,
+            lead_speed=lead_speed,
+            trail_speed=trail_speed,
+            config=config,
+        )
+        total = style + config.boundary_weight * boundary + regularization
         return total.sum(), total
 
     initial = {"theta": jnp.zeros((len(spans), config.knots - 1), dtype=path.dtype), "span": spans}
@@ -330,8 +453,9 @@ def retime_stroke(
 
     `source_times`, if supplied, are local timestamps of the input path's original
     execution; otherwise input points are assumed uniformly spaced over original_duration.
-    Lead/trail speeds are soft targets in MODEL coordinates; zero pins the emitted
-    endpoint velocity to rest. Acceleration is recomputed after pinning and checked.
+    Lead/trail speeds are soft targets in MODEL coordinates. With the default
+    quintic clock, zero eases the position trajectory to rest; emitted endpoint
+    velocity is also pinned. Acceleration is recomputed after pinning and checked.
     Smoothing changes geometry explicitly; validate collision/task feasibility with
     trajectory_validator. It receives the emitted positions and timestamps.
     """
@@ -395,6 +519,7 @@ def retime_stroke(
         jnp.asarray(starts, dtype=jnp.float32),
         jnp.float32(lower * rate),
         jnp.float32(upper * rate),
+        jnp.float32(original_duration * rate),
         target,
         joint_indices=joint_map.indices,
         n_frames=int(np.ceil(upper * rate)) + 8,
@@ -411,7 +536,15 @@ def retime_stroke(
             continue
         count = max(3, int(round(duration / output_dt)) + 1)
         times = np.linspace(0.0, duration, count)
-        progress = np.interp(times / duration, clock, np.linspace(0.0, 1.0, len(clock)))
+        progress = np.asarray(
+            sample_clock(
+                jnp.asarray(clock[None]),
+                jnp.asarray((times / duration)[None]),
+                interpolation=config.clock_interpolation,
+                rest_start=lead_speed == 0,
+                rest_end=trail_speed == 0,
+            )
+        )[0]
         emitted = np.stack([np.interp(progress, arc, path[:, j]) for j in range(q.shape[1])], -1)
         emitted[0], emitted[-1] = q[0], q[-1]
         dt = float(times[1])
@@ -435,15 +568,48 @@ def retime_stroke(
             continue
         style = _score_emitted(encoder, emitted, times, joint_map, target)
         boundary = _boundary_cost(emitted, times, joint_map, lead_speed, trail_speed, rate)
-        objective = style + config.boundary_weight * boundary
+        regularization = float(
+            timing_regularization(jnp.asarray(clock[None]), duration, original_duration, config)[0]
+        )
+        motion_cost = config.acceleration_weight * np.mean(
+            (np.diff(emitted, n=2, axis=0) / dt**2) ** 2
+        )
+        if len(emitted) >= 4:
+            motion_cost += config.jerk_weight * np.mean(
+                (np.diff(emitted, n=3, axis=0) / dt**3) ** 2
+            )
+        regularization += float(motion_cost)
+        objective = style + config.boundary_weight * boundary + regularization
         if np.isfinite(objective) and (best is None or objective < best[0]):
-            best = (objective, emitted, times, velocities, accelerations, style, boundary, clock)
+            best = (
+                objective,
+                emitted,
+                times,
+                velocities,
+                accelerations,
+                style,
+                boundary,
+                clock,
+                regularization,
+                float(motion_cost),
+            )
     if best is None:
         raise RetimingError(
             "No emitted stroke satisfies motion limits and trajectory validation "
             f"within duration bounds [{lower:.3g}, {upper:.3g}] seconds"
         )
-    objective, emitted, times, velocities, accelerations, style, boundary, clock = best
+    (
+        objective,
+        emitted,
+        times,
+        velocities,
+        accelerations,
+        style,
+        boundary,
+        clock,
+        regularization,
+        motion_cost,
+    ) = best
     original_style = _score_emitted(encoder, q, source_times, joint_map, target)
     return RetimedStroke(
         emitted,
@@ -462,4 +628,6 @@ def retime_stroke(
         clock,
         lead_speed,
         trail_speed,
+        regularization,
+        motion_cost,
     )

@@ -23,6 +23,9 @@ The default output folder is `work/pick-place-comparison/`:
 - Each mode's `plan.npz`, `planning.json`, `simulation.npz`, and `metrics.json`:
   commanded trajectory, selected IK branches, optimization/retiming diagnostics,
   actual joint and cube histories, and final placement results.
+- `source_plan.npz`: each mode's smooth source trajectory before final timing
+  (baseline boundary ramps or DATAFARM retiming);
+  its gripper timestamps are recorded as `source_events` in `planning.json`.
 - `scene.xml` and `robot.urdf`: the generated simulation and planning models.
 
 The assets, binary trajectories and videos remain in ignored local `work/`
@@ -38,7 +41,7 @@ The learned models use the package's pinned Hugging Face downloads and cache.
 | --- | --- | --- |
 | IK | Nearest feasible solution to the current configuration | Minimum posture-GMM NLL among feasible solutions |
 | Trajectory optimization | PyRoki pose tracking, smoothness, acceleration, endpoint, joint and velocity terms | The same terms plus one frozen encoder residual spanning each whole leg |
-| Timing | Fixed 0.1 s waypoint clock, with rest at leg endpoints | Join legs between gripper actions and optimize complete strokes using the encoder |
+| Timing | Fixed source durations, continuous motion through leg joins; rest at gripper events and plan ends | The same source geometry, with smooth regularized encoder-based stroke timing |
 | Gripper/physics | Identical opening/closing commands, dwell lengths and contact model | Identical opening/closing commands, dwell lengths and contact model |
 
 The baseline loads the released models only to report comparable NLL/style scores.
@@ -52,7 +55,18 @@ The simple scene uses clear vertical approaches and raised transport legs;
 this is local trajectory refinement with known task waypoints, not a general
 obstacle-search/task-planning system.
 
-DataFarm mode retimes seven gripper-delimited strokes with 32 clock knots, eight
+Intermediate leg endpoints are position constraints, with no duplicated rest
+samples or per-leg minimum-jerk clock. Both modes interpolate a common type of
+C2 cubic joint curve through the source waypoints, with zero endpoint velocity
+only at gripper events and the plan ends. The baseline preserves the original
+stroke duration (the sum of 1.9 s source legs) and samples this curve at 20 ms.
+Its fixed clock uses smooth speed ramps over the first/last 10% of each stroke,
+with uniform cruise between them. These ramps only occur at gripper/plan
+boundaries; intermediate legs do not receive individual easing or holds.
+Geometry between source
+waypoints changes slightly; the physics replay checks unintended contacts.
+
+DataFarm mode retimes seven gripper-delimited strokes with 16 clock knots, eight
 starts and 250 Adam iterations by default. `--retime-starts` and
 `--retime-iterations` change these settings. Timing uses a fixed geometric path,
 zero boundary-speed targets for grasps/releases, and checks commanded velocities,
@@ -60,6 +74,14 @@ accelerations and stitched junctions. The demo's retiming caps are 2 rad/s and
 20 rad/s² per arm coordinate, with duration bounds from 0.7× to 3× the original
 stroke, clipped by the retimer's overall duration range. These are simulation
 settings. `--encoder-weight` changes the whole-leg learned-cost weight (default 0.3).
+The clock is a monotone C2 quintic with genuine easing at rest boundaries. Explicit
+penalties discourage adjacent clock-rate fluctuations (weight 0.1), large departures
+from uniform arc speed (0.5), and excess duration (2 times duration/source duration).
+Direct mean squared acceleration (0.1) and jerk (0.01) penalties also account for
+bends in the joint path; smooth clock rates alone cannot remove that roughness.
+These additions trade some learned style score for smoother, more efficient timing;
+they are configurable through `RetimeConfig` and recorded with each stroke.
+See [retiming](retiming.md) for the complete objective and geometry limitations.
 
 ## Actual manipulation and validation
 
@@ -74,6 +96,7 @@ on the disc or if unintended penetrating robot contacts are detected.
 A fresh run measures both planner-space and executed behavior: per-leg latent
 Mahalanobis costs, selected posture NLL, seven stroke timing scores, execution
 duration, joint tracking error, joint motion and final XY placement errors.
+Commanded acceleration and jerk RMS are also recorded to inspect timing smoothness.
 The style score is the objective being optimized; its reduction alone does not
 establish greater human preference or task performance. A paired scene/seed shows
 the full integration's behavior, not a separate ablation of its three components.

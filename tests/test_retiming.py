@@ -7,7 +7,14 @@ import pytest
 import torch
 
 from datafarm_pyroki import JointMap, RetimeConfig, RetimingError, retime_stroke
-from datafarm_pyroki.retiming import clock_knots, sample_clock, sample_path, timing_objective
+from datafarm_pyroki.retiming import (
+    clock_knots,
+    motion_regularization,
+    sample_clock,
+    sample_path,
+    timing_objective,
+    timing_regularization,
+)
 
 
 @pytest.fixture
@@ -35,6 +42,99 @@ def test_clock_and_path_preserve_sharp_corners():
     np.testing.assert_allclose(actual, [[0.5, 0.0], [1.0, 0.0], [1.0, 0.5]])
 
 
+def test_quintic_clock_is_monotone_c2_and_stops_at_requested_ends():
+    with jax.enable_x64(True):
+        tau = clock_knots(jnp.array([[0.7, -0.4, 0.3, -0.8]], dtype=jnp.float64))
+
+        def evaluate(t):
+            return sample_clock(
+                tau, t.reshape(1, 1), interpolation="quintic", rest_start=True, rest_end=True
+            )[0, 0]
+
+        velocity = jax.grad(evaluate)
+        acceleration = jax.grad(velocity)
+        grid = jnp.linspace(0, 1, 1001)
+        values = jax.vmap(evaluate)(grid)
+        assert np.all(np.diff(values) > 0)
+        np.testing.assert_allclose(np.asarray(values)[[0, -1]], [0, 1], atol=1e-12)
+        np.testing.assert_allclose(jax.vmap(velocity)(jnp.array([0.0, 1.0])), 0, atol=1e-12)
+        # Both sides of every knot agree in value, speed and acceleration.
+        eps = 1e-8
+        for knot in tau[0, 1:-1]:
+            for fn in (evaluate, velocity, acceleration):
+                np.testing.assert_allclose(fn(knot - eps), fn(knot + eps), atol=2e-4)
+        np.testing.assert_allclose(jax.vmap(acceleration)(jnp.array([0.0, 1.0])), 0, atol=1e-10)
+
+        # Clock-parameter gradients must also propagate through the new sampler.
+        def loss(theta):
+            return sample_clock(
+                clock_knots(theta), jnp.array([[0.27, 0.63]]), interpolation="quintic"
+            ).sum()
+
+        theta = jnp.array([[0.7, -0.4, 0.3, -0.8]])
+        direction = jnp.array([[0.1, 0.3, -0.4, 0.2]])
+        exact = jnp.sum(jax.grad(loss)(theta) * direction)
+        finite = (loss(theta + 1e-5 * direction) - loss(theta - 1e-5 * direction)) / 2e-5
+        np.testing.assert_allclose(exact, finite, rtol=1e-6)
+
+
+def test_clock_regularization_penalizes_wiggles_and_excess_duration():
+    config = RetimeConfig()
+    uniform = clock_knots(jnp.zeros((1, 15)))
+    wiggly = clock_knots(jnp.array([[0.5, -0.5] * 7 + [0.5]]))
+    base = timing_regularization(uniform, 30.0, 30.0, config)
+    assert float(timing_regularization(wiggly, 30.0, 30.0, config)[0]) > float(base[0]) + 5
+    np.testing.assert_allclose(timing_regularization(uniform, 60.0, 30.0, config), 2 * base)
+
+
+def test_motion_cost_uses_physical_derivatives_all_joints_and_ignores_padding():
+
+    with jax.enable_x64(True):
+        path = jnp.array([[0.0, 0.0], [0.0, 1.0]], dtype=jnp.float64)
+        arc = jnp.array([0.0, 1.0])
+        clock = jnp.array([[0.0, 0.4, 1.0]])
+        config = RetimeConfig(regularization_rate_hz=50.0)
+        duration = jnp.array([1.3])
+
+        def score(duration, n_frames=80, path=path):
+            return motion_regularization(
+                path,
+                arc,
+                clock,
+                duration,
+                n_frames=n_frames,
+                lead_speed=0.0,
+                trail_speed=0.0,
+                config=config,
+            )[0]
+
+        # Independently finite-difference the physical position signal.
+        frames = np.arange(80)
+        q = np.asarray(
+            sample_clock(
+                clock,
+                jnp.asarray(frames[None] / 65.0),
+                interpolation="quintic",
+                rest_start=True,
+                rest_end=True,
+            )
+        )[0]
+        expected = 0.0
+        for order, weight in [(2, config.acceleration_weight), (3, config.jerk_weight)]:
+            derivative = np.diff(q, n=order) * 50**order
+            valid = np.clip(65.0 - frames[order:], 0, 1)
+            expected += weight * np.sum(derivative**2 * valid) / (2 * valid.sum())
+        np.testing.assert_allclose(score(duration), expected, rtol=1e-10)
+        np.testing.assert_allclose(score(duration, 120), expected, rtol=1e-10)
+        assert float(score(duration, path=path * 2)) > 3.9 * float(score(duration))
+        # Interior-duration gradients include the physical timescale, rather than
+        # only resampling a fixed number of frames at a different nominal dt.
+        duration = jnp.array([1.307])
+        exact = jax.grad(score)(duration)[0]
+        finite = (score(duration + 1e-6) - score(duration - 1e-6)) / 2e-6
+        np.testing.assert_allclose(exact, finite, rtol=1e-5)
+
+
 def test_timing_cost_and_duration_profile_gradients_match_torch(encoder, torch_encoder):
     from test_encoder import torch_masked_encode
 
@@ -46,7 +146,7 @@ def test_timing_cost_and_duration_profile_gradients_match_torch(encoder, torch_e
         arc = np.linspace(0.0, 1.0, len(path))
         theta = rng.normal(size=(2, 7)) * 0.1
         span = np.array([24.3, 31.7])
-        config = RetimeConfig(knots=8, starts=2, iterations=2)
+        config = RetimeConfig(knots=8, starts=2, iterations=2, clock_interpolation="linear")
         tp = torch.tensor(path)
         ta = torch.tensor(arc)
         tt = torch.tensor(theta, requires_grad=True)
@@ -144,6 +244,12 @@ def test_actual_retimer_emits_feasible_motion(encoder, stroke_input, short_confi
     assert 1.0 <= result.duration <= 3.0 and np.all(np.diff(result.times) > 0)
     assert np.max(abs(result.velocities)) <= 3 and np.max(abs(result.accelerations)) <= 30
     assert np.isfinite(result.objective)
+    np.testing.assert_allclose(
+        result.objective,
+        result.style_cost
+        + short_config.boundary_weight * result.boundary_cost
+        + result.regularization_cost,
+    )
     # Clock shape and scale are separate optimized quantities.
     assert result.clock.shape == (8,) and np.all(np.diff(result.clock) > 0)
     assert np.isclose(result.times[-1], result.duration)

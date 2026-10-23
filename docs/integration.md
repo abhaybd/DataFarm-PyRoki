@@ -89,7 +89,11 @@ only profile knots and duration change.
 Compared with the pinned implementation, smoothing defaults to zero and the
 original continuous polyline is retained separately from the 64 clock knots.
 Initial clock candidates are kept as feasible fallbacks, and final candidates
-are ranked by their emitted style-plus-boundary objective. Rest-end acceleration
+are ranked by their emitted style, boundary and regularization objective. The
+default clock is monotone C2, with true easing into requested rest endpoints;
+profile variation, duration, acceleration and jerk penalties discourage uneven
+timing. These are explicit engineering priors added to the upstream style objective.
+Rest-end acceleration
 is recomputed after endpoint velocity pinning; the whole plan is checked across
 gripper junctions. Sampled targets use an explicit JAX PRNG key, rather than a
 hidden geometry-derived seed. These are explicit adaptations, not a bitwise port

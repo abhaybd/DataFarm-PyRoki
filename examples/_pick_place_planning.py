@@ -127,8 +127,6 @@ class Planner:
                 ),
                 table(variables),
                 endpoint(points[0], initial[0]),
-                endpoint(points[1], initial[0]),
-                endpoint(points[-2], initial[-1]),
                 endpoint(points[-1], initial[-1]),
             ]
             if self.datafarm:
@@ -236,7 +234,6 @@ class Planner:
     def leg(self, start, goal, label, *, allowed_cube=None):
         before = time.monotonic()
         u = np.linspace(0.0, 1.0, N_WAYPOINTS)
-        u = 10 * u**3 - 15 * u**4 + 6 * u**5
         initial = start + u[:, None] * (goal - start)
         endpoints = np.asarray(self.fk(jnp.asarray(np.stack([start, goal]))))[:, self.tcp]
         targets = np.empty((N_WAYPOINTS, 7), np.float32)
@@ -250,7 +247,7 @@ class Planner:
         q = np.asarray(
             self.optimize(jnp.asarray(initial, dtype=jnp.float32), jnp.asarray(targets))
         ).copy()
-        q[:2], q[-2:] = start, goal
+        q[0], q[-1] = start, goal
         poses = np.asarray(self.fk(jnp.asarray(q)))[:, self.tcp]
         max_error = float(np.linalg.norm(poses[:, 4:] - targets[:, 4:], axis=-1).max())
         dense_grid = np.linspace(0, len(q) - 1, 5 * (len(q) - 1) + 1)

@@ -11,6 +11,7 @@ import argparse
 import json
 import subprocess
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import imageio_ffmpeg
@@ -29,9 +30,11 @@ from _pick_place_scene import (
     make_urdf,
 )
 from PIL import Image, ImageDraw, ImageFont
+from scipy.interpolate import CubicSpline
 
 from datafarm_pyroki import GripperEvent, MotionLeg, RetimeConfig, RetimedStroke, retime_plan
 from datafarm_pyroki.assets import MODEL_ASSETS
+from datafarm_pyroki.strokes import group_strokes
 
 
 def initial_state(model):
@@ -47,11 +50,57 @@ def initial_state(model):
     return data
 
 
-def baseline_timeline(steps):
-    """Use the same fixed waypoint clock, without DataFarm's stroke retimer."""
+def smooth_strokes(steps, output_dt=0.02):
+    """Interpolate through leg joins; request rest only at gripper/plan boundaries.
+
+    Both modes use this C2 interpolation. This changes the geometric
+    interpolation between waypoints, so execution/collision checks remain required.
+    """
+    result = []
+    for step in group_strokes(steps):
+        if isinstance(step, GripperEvent):
+            result.append(step)
+            continue
+        zeros = np.zeros(step.positions.shape[1])
+        spline = CubicSpline(step.times, step.positions, bc_type=((1, zeros), (1, zeros)))
+        count = max(3, int(round(step.duration / output_dt)) + 1)
+        times = np.linspace(0, step.duration, count)
+        positions = spline(times)
+        positions[0], positions[-1] = step.positions[0], step.positions[-1]
+        result.append(MotionLeg(positions, float(times[1]), "; ".join(step.labels)))
+    return result
+
+
+def baseline_stroke_positions(positions, dt):
+    """Fixed duration, uniform cruise, smooth ramps over the outer 10% of time."""
+    t = np.arange(len(positions)) * dt
+    u = t / t[-1]
+    ramp = 0.1
+
+    def integral(x):
+        # Integral of the quintic smoothstep velocity ramp, from zero to x.
+        return x**6 - 3 * x**5 + 2.5 * x**4
+
+    progress = np.where(
+        u < ramp,
+        ramp * integral(np.clip(u / ramp, 0, 1)) / (1 - ramp),
+        np.where(
+            u > 1 - ramp,
+            1 - ramp * integral(np.clip((1 - u) / ramp, 0, 1)) / (1 - ramp),
+            (u - ramp / 2) / (1 - ramp),
+        ),
+    )
+    zeros = np.zeros(positions.shape[1])
+    q = CubicSpline(t, positions, bc_type=((1, zeros), (1, zeros)))(t[-1] * progress)
+    q[0], q[-1] = positions[0], positions[-1]
+    return q
+
+
+def baseline_timeline(steps, *, ease_boundaries=True):
+    """Fixed source timing through leg joins; rest only at gripper events and ends."""
     positions, times, events = [HOME.copy()], [0.0], []
     elapsed = 0.0
-    for step in steps:
+    for step in smooth_strokes(steps):
         if isinstance(step, GripperEvent):
             events.append({"time": elapsed, "command": step.command})
             count = max(1, int(np.ceil(step.dwell_seconds / 0.02)))
@@ -59,10 +108,36 @@ def baseline_timeline(steps):
             positions.extend([positions[-1].copy() for _ in range(count)])
             elapsed += step.dwell_seconds
         else:
+            q = (
+                baseline_stroke_positions(step.positions, step.dt)
+                if ease_boundaries
+                else step.positions
+            )
             times.extend(elapsed + np.arange(1, len(step.positions)) * step.dt)
-            positions.extend(step.positions[1:])
+            positions.extend(q[1:])
             elapsed = times[-1]
     return np.asarray(positions), np.asarray(times), events
+
+
+def validate_timeline(model, q, times):
+    """Recheck limits after curve interpolation/retiming, including gripper holds."""
+    ranges = np.array([model.joint(f"joint{i}").range for i in range(1, 8)])
+    velocity = np.gradient(q, times, axis=0)
+    velocity[[0, -1]] = 0
+    acceleration = np.gradient(velocity, times, axis=0)
+    interval_speed = np.diff(q, axis=0) / np.diff(times)[:, None]
+    if (
+        not np.isfinite(q).all()
+        or not np.all(np.diff(times) > 0)
+        or np.any(q < ranges[:, 0] - 0.002)
+        or np.any(q > ranges[:, 1] + 0.002)
+        or np.max(abs(interval_speed)) > 2.0
+        or np.max(abs(velocity)) > 2.0
+        or np.max(abs(acceleration)) > 20.0
+    ):
+        raise RuntimeError(
+            "Interpolated timeline violates joint position/velocity/acceleration limits"
+        )
 
 
 def plan_task(planner):
@@ -110,7 +185,7 @@ def make_timeline(planner, steps, args):
         return q, times, events, [], 0.0
     print("Retiming gripper-delimited strokes with the frozen encoder…", flush=True)
     config = RetimeConfig(
-        knots=32,
+        knots=16,
         starts=args.retime_starts,
         iterations=args.retime_iterations,
         min_duration_multiplier=0.7,
@@ -118,7 +193,7 @@ def make_timeline(planner, steps, args):
     )
     plan = retime_plan(
         planner.encoder,
-        steps,
+        smooth_strokes(steps),
         joint_map=planner.mapping,
         output_dt=0.02,
         velocity_limits=np.full(7, 2.0),
@@ -128,7 +203,15 @@ def make_timeline(planner, steps, args):
     )
     strokes = [step for step in plan.steps if isinstance(step, RetimedStroke)]
     records = [
-        {"duration": s.duration, "style_before": s.original_style_cost, "style_after": s.style_cost}
+        {
+            "duration": s.duration,
+            "style_before": s.original_style_cost,
+            "style_after": s.style_cost,
+            "regularization_cost": s.regularization_cost,
+            "motion_cost": s.motion_cost,
+            "objective": s.objective,
+            "settings": asdict(config),
+        }
         for s in strokes
     ]
     events = [{"time": event.time, "command": event.event.command} for event in plan.events]
@@ -370,6 +453,9 @@ def simulate(
     success = placed_mask(positions)
     history = np.asarray(actual_q)
     tracking = history - np.asarray(commanded_q)
+    command_velocity = np.gradient(q, times, axis=0)
+    command_acceleration = np.gradient(command_velocity, times, axis=0)
+    command_jerk = np.gradient(command_acceleration, times, axis=0)
     np.savez_compressed(
         output / "simulation.npz",
         times=log_times,
@@ -379,6 +465,8 @@ def simulate(
     )
     return {
         "duration_s": duration,
+        "commanded_acceleration_rms_rad_s2": float(np.sqrt(np.mean(command_acceleration**2))),
+        "commanded_jerk_rms_rad_s3": float(np.sqrt(np.mean(command_jerk**2))),
         "unintended_robot_contact_steps": unintended_contacts,
         "worst_unintended_penetration_m": worst_penetration,
         "cubes_on_disc": int(success.sum()),
@@ -413,6 +501,8 @@ def run(args, enabled, model, robot_path):
         )
         before = time.monotonic()
         steps = plan_task(planner)
+        source_q, source_times, source_events = baseline_timeline(steps, ease_boundaries=False)
+        np.savez_compressed(output / "source_plan.npz", positions=source_q, times=source_times)
         q, times, events, strokes, retime_seconds = make_timeline(planner, steps, args)
         metadata = {
             "datafarm": enabled,
@@ -421,8 +511,12 @@ def run(args, enabled, model, robot_path):
             "planning_wall_seconds": time.monotonic() - before,
             "retiming_wall_seconds": retime_seconds,
             "source_dt": SOURCE_DT,
+            "source_events": source_events,
+            "baseline_clock": {"boundary_ramp_fraction": 0.1, "learned_timing": False}
+            if not enabled
+            else None,
             "retiming_settings": {
-                "clock_knots": 32,
+                "clock_knots": 16,
                 "starts": args.retime_starts,
                 "iterations": args.retime_iterations,
                 "velocity_cap_rad_s": 2.0,
@@ -443,6 +537,7 @@ def run(args, enabled, model, robot_path):
         np.savez_compressed(plan_path, positions=q, times=times)
         metadata_path.write_text(json.dumps(metadata, indent=2))
     print(f"Simulating {name}: {times[-1]:.2f}s of arm/gripper commands", flush=True)
+    validate_timeline(model, q, times)
     metrics = simulate(
         model,
         q,
