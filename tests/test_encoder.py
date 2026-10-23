@@ -119,14 +119,26 @@ def test_preprocessing_latent_cost_and_waypoint_gradients(encoder, torch_encoder
     assert np.isfinite(grad).all()
 
 
-def test_whitening_and_batch_semantics(encoder, motion):
+def test_whitening_and_weight_scaling(encoder, motion):
     q = jnp.stack([motion, motion + 0.02])
     mu = encoder.latent(q, 0.15)
     delta = mu - encoder.latent_mean
     direct = jnp.einsum("bi,ij,bj->b", delta, encoder.latent_precision, delta)
     np.testing.assert_allclose(encoder.cost(q, 0.15), direct, rtol=2e-6)
     np.testing.assert_allclose(encoder.cost(q, 0.15, weight=4), direct * 4, rtol=2e-6)
-    np.testing.assert_allclose(encoder.cost(q, 0.15)[0], encoder.cost(q[0], 0.15), rtol=2e-6)
+
+
+@pytest.mark.parametrize("dtype,rtol", [(jnp.float32, 1e-5), (jnp.float64, 1e-10)])
+def test_single_and_batched_costs_match(encoder, motion, dtype, rtol):
+    with jax.enable_x64(dtype == jnp.float64):
+        model = jax.tree.map(lambda x: x.astype(dtype), encoder)
+        q = jnp.asarray(np.stack([motion, motion + 0.02]), dtype=dtype)
+        batched = model.cost(q, 0.15)
+        individual = jnp.stack([model.cost(row, 0.15) for row in q])
+        # Batch shape can select different convolution/reduction kernels. Float32
+        # roundoff is amplified by the network and latent metric (about 2e-6 on
+        # Linux CPU); keep the float64 check tight to catch batch coupling.
+        np.testing.assert_allclose(batched, individual, rtol=rtol)
 
 
 def test_padding_exact_matches_unpadded_prefix(encoder):
