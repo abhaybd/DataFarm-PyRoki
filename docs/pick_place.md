@@ -1,0 +1,94 @@
+# MuJoCo pick-and-place comparison
+
+`examples/pick_place.py` uses PyRoki IK and trajectory optimization to move three
+4 cm cubes from a table onto a flat disc. The simulated robot is a nominal Franka
+Panda arm with a Robotiq 2F-85 gripper, matching the DROID hardware layout. Object
+poses and the task sequence are specified by the example; it does not use perception.
+
+```sh
+uv sync --extra planning --extra simulation
+uv run hf auth login  # required while the two model repositories are private
+uv run --extra planning --extra simulation python examples/pick_place.py --compare
+```
+
+Run a single mode with `--datafarm` or `--no-datafarm`. `--compare` runs both and
+writes a synchronized, normal-speed split-screen video. The shorter run holds its
+last frame after finishing; neither run is sped up to match the other.
+
+The default output folder is `work/pick-place-comparison/`:
+
+- `baseline/video.mp4`, `datafarm/video.mp4`: annotated individual videos.
+- `comparison.mp4`: baseline on the left, DataFarm on the right.
+- `comparison.json`: measured execution and motion metrics for both modes.
+- Each mode's `plan.npz`, `planning.json`, `simulation.npz`, and `metrics.json`:
+  commanded trajectory, selected IK branches, optimization/retiming diagnostics,
+  actual joint and cube histories, and final placement results.
+- `scene.xml` and `robot.urdf`: the generated simulation and planning models.
+
+The assets, binary trajectories and videos remain in ignored local `work/`
+directories. The robot meshes are fetched once from a pinned
+[MuJoCo Menagerie revision](https://github.com/google-deepmind/mujoco_menagerie/tree/cda5236f98383f6fbaa4820c6b18dba892cd087f).
+Downloads verify Git blob hashes. The upstream Franka Apache-2.0 and Robotiq BSD
+license files are kept with the downloaded models. Mesh binaries are not committed.
+The learned models use the package's pinned Hugging Face downloads and cache.
+
+## What the flag changes
+
+| Stage | DataFarm off | DataFarm on |
+| --- | --- | --- |
+| IK | Nearest feasible solution to the current configuration | Minimum posture-GMM NLL among feasible solutions |
+| Trajectory optimization | PyRoki pose tracking, smoothness, acceleration, endpoint, joint and velocity terms | The same terms plus one frozen encoder residual spanning each whole leg |
+| Timing | Fixed 0.1 s waypoint clock, with rest at leg endpoints | Join legs between gripper actions and optimize complete strokes using the encoder |
+| Gripper/physics | Identical opening/closing commands, dwell lengths and contact model | Identical opening/closing commands, dwell lengths and contact model |
+
+The baseline loads the released models only to report comparable NLL/style scores.
+
+Both modes use a fixed random seed for their common IK seed bank, plus the current
+configuration as a warm start. The gripper TCP is exported from MuJoCo into the
+URDF, and PyRoki/MuJoCo FK is checked before planning. Each of the 19 motion legs is
+optimized in PyRoki/jaxls. IK candidates are checked for pose error, joint limits
+and MuJoCo collision geometry. Optimized paths receive denser collision checks.
+The simple scene uses clear vertical approaches and raised transport legs;
+this is local trajectory refinement with known task waypoints, not a general
+obstacle-search/task-planning system.
+
+DataFarm mode retimes seven gripper-delimited strokes with 32 clock knots, eight
+starts and 250 Adam iterations by default. `--retime-starts` and
+`--retime-iterations` change these settings. Timing uses a fixed geometric path,
+zero boundary-speed targets for grasps/releases, and checks commanded velocities,
+accelerations and stitched junctions. The demo's retiming caps are 2 rad/s and
+20 rad/s² per arm coordinate, with duration bounds from 0.7× to 3× the original
+stroke, clipped by the retimer's overall duration range. These are simulation
+settings. `--encoder-weight` changes the whole-leg learned-cost weight (default 0.3).
+
+## Actual manipulation and validation
+
+Arm position actuators execute the planned commands at MuJoCo's 2 ms physics
+step, with gravity compensation. The Robotiq linkage closes using its actuator;
+friction/contact forces lift each cube. Cube poses are initialized once and then
+integrated by MuJoCo. There are no cube welds, attachments or pose overrides during
+execution. The example records peak lifted heights, bilateral finger-contact
+steps and unintended robot contacts. It fails if fewer than three cubes finish
+on the disc or if unintended penetrating robot contacts are detected.
+
+A fresh run measures both planner-space and executed behavior: per-leg latent
+Mahalanobis costs, selected posture NLL, seven stroke timing scores, execution
+duration, joint tracking error, joint motion and final XY placement errors.
+The style score is the objective being optimized; its reduction alone does not
+establish greater human preference or task performance. A paired scene/seed shows
+the full integration's behavior, not a separate ablation of its three components.
+
+## Iteration and rendering
+
+```sh
+# Contact simulation and metrics without an OpenGL context:
+uv run --extra planning --extra simulation python examples/pick_place.py --compare --no-render
+
+# Render/simulate already saved plans without repeating IK/trajopt/retiming:
+uv run --extra planning --extra simulation python examples/pick_place.py --compare --reuse-plan
+```
+
+`--output`, `--asset-cache`, `--fps`, `--width`, and `--height` configure local
+artifacts and rendering. On a headless Linux machine, use MuJoCo's supported EGL
+or OSMesa backend via `MUJOCO_GL`. On macOS, offscreen rendering needs an available
+graphics session. The no-render mode only requires the physics engine.

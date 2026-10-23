@@ -259,6 +259,19 @@ candidate generation stay with the caller. See [docs/integration.md](docs/integr
 for the upstream hooks. `solve_leg` keeps its clock fixed; its endpoint-rest
 option applies before stroke retiming.
 
+## MuJoCo three-cube comparison
+
+```sh
+uv run --extra planning --extra simulation python examples/pick_place.py --compare
+```
+
+This simulates a DROID-style Franka/Robotiq picking three cubes onto a flat disc
+and renders normal-speed videos with DataFarm off/on. Use `--datafarm` or
+`--no-datafarm` for individual runs. The flag switches posture-prior IK selection,
+whole-leg encoder costs and stroke retiming. Manipulation uses MuJoCo contact
+physics; output includes grasp/placement checks, trajectories and comparison
+metrics. See [docs/pick_place.md](docs/pick_place.md) for setup, controls and scope.
+
 ## Checkpoint provenance and reproduction
 
 The default Hub revisions and SHA256 hashes are pinned in
