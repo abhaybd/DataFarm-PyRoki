@@ -1,7 +1,7 @@
 # Joint-position NLL selection
 
 `JointPositionPrior` represents a full-covariance Gaussian mixture. It is separate
-from the motion encoder and its latent reference Gaussian. The local DROID GMM
+from the motion encoder and its latent reference Gaussian. The default DROID GMM
 has 16 components over seven proximal-to-distal Franka arm coordinates. Its
 provenance records 4,000 episodes / 987,631 non-idle frames. The source parameters
 are extracted without refitting from the pinned cuTAMP `posture_ref.npz`.
@@ -59,9 +59,14 @@ numbers of joints/components and coexist without shared global state.
 
 ## Artifact location and license
 
-`load_joint_prior()` checks `DATAFARM_ASSET_DIR/droid_joint_prior.npz` when that
-environment variable is set, otherwise the local source asset folder. Explicit
-paths override either default. Missing weights produce setup instructions.
+`load_joint_prior()` resolves the pinned artifact from
+[abhaybd/DataFarm-Jax-PosturePrior-Franka](https://huggingface.co/abhaybd/DataFarm-Jax-PosturePrior-Franka),
+verifies its SHA256, and reuses the standard Hugging Face cache. Use `hf auth login`,
+`HF_TOKEN`, or `token=` for private-repository access. `cache_dir=` selects another
+Hub cache; `local_files_only=True` requires an existing cache entry. `HF_HUB_OFFLINE=1`
+provides the corresponding environment setting. An explicit NPZ path bypasses the
+Hub and allows another trained model; source-tree artifacts and `DATAFARM_ASSET_DIR`
+are no longer implicit defaults.
 
 `uv run python scripts/convert_joint_prior.py` reproduces the pinned reference
 from upstream. The source GMM is under the NVIDIA License (research/evaluation

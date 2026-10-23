@@ -53,8 +53,8 @@ def test_full_nll_in_original_coordinates_and_gradient():
         np.testing.assert_allclose(grad[row, col], difference, atol=2e-3, rtol=2e-3)
 
 
-def test_bundled_prior_matches_upstream_scoring_formula():
-    prior = load_joint_prior()
+def test_reference_prior_matches_upstream_scoring_formula(joint_prior_checkpoint):
+    prior = load_joint_prior(joint_prior_checkpoint)
     assert prior.means.shape == (16, 7)
     q = np.random.default_rng(5).normal(size=(6, 7)).astype(np.float32)
     factor = np.asarray(prior.precision_factors)

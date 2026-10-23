@@ -7,7 +7,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from datafarm_pyroki.encoder import load_encoder, sample_count
+from datafarm_pyroki.encoder import sample_count
 
 
 def torch_preprocess(encoder, q, dt):
@@ -160,4 +160,3 @@ def test_invalid_inputs(encoder):
             encoder.cost(jnp.zeros((32, 7)), dt)
     with pytest.raises(ValueError):
         encoder.cost(jnp.zeros((32, 7)), 0.1, weight=-1)
-    assert isinstance(load_encoder(), type(encoder))

@@ -129,9 +129,25 @@ def _validated_prior(weights, means, factors, location, scale, name, names):
     )
 
 
-def load_joint_prior(path: str | Path | None = None) -> JointPositionPrior:
-    """Load a model, defaulting to the separately downloaded DROID configuration GMM."""
-    with open_model_asset("droid_joint_prior.npz", path) as stream:
+def load_joint_prior(
+    path: str | Path | None = None,
+    *,
+    cache_dir: str | Path | None = None,
+    token: str | bool | None = None,
+    local_files_only: bool = False,
+) -> JointPositionPrior:
+    """Load the pinned HF posture GMM, or an explicit pickle-free NPZ for another model.
+
+    HF login/HF_TOKEN is used by default. cache_dir overrides the Hub cache;
+    local_files_only requires the pinned checkpoint to have been cached already.
+    """
+    with open_model_asset(
+        "droid_joint_prior.npz",
+        path,
+        cache_dir=cache_dir,
+        token=token,
+        local_files_only=local_files_only,
+    ) as stream:
         with np.load(stream, allow_pickle=False) as z:
             if int(z["schema_version"]) != 1:
                 raise ValueError("Unsupported joint prior schema")

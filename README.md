@@ -11,38 +11,51 @@ jaxls to tested Git revisions.
 
 ```sh
 uv sync --extra planning
-# Reproduce the pinned checkpoints locally (downloads the upstream source assets):
-uv run python scripts/convert_checkpoint.py
-uv run python scripts/convert_joint_prior.py
+# These model repositories are currently private; authenticate once:
+uv run hf auth login
 uv run python examples/score_motion.py
 uv run --extra planning pytest
 ```
 
-After obtaining the converted weights, encoder-only inference needs neither PyTorch
-nor the planning dependencies:
+`load_encoder()` and `load_joint_prior()` now download their default weights from:
+
+- [abhaybd/DataFarm-Jax-MotionEncoder-Franka](https://huggingface.co/abhaybd/DataFarm-Jax-MotionEncoder-Franka)
+- [abhaybd/DataFarm-Jax-PosturePrior-Franka](https://huggingface.co/abhaybd/DataFarm-Jax-PosturePrior-Franka)
+
+Downloads use pinned commit revisions, verify SHA256 against the released
+artifacts, and are reused from the standard Hugging Face cache. Authenticate with
+`hf auth login`, set `HF_TOKEN` to a token with read access to both repositories,
+or pass `token=` to a loader. Inference needs neither PyTorch nor planning extras:
 
 ```sh
 uv sync --no-dev
 uv run --no-dev python examples/score_motion.py
 ```
 
-Checkpoint binaries are **excluded from Git and package builds**. Reproduction
-above writes ignored local NPZ files under `src/datafarm_pyroki/assets/`. Alternatively,
-download converted artifacts from a separate host; the fetch helper accepts Hugging
-Face `resolve` URLs and verifies SHA256 against the tracked provenance:
+To prefetch both models, choose a cache location, or load entirely offline:
 
 ```sh
-uv run --no-dev python scripts/fetch_assets.py \
-  --encoder-url "$ENCODER_URL" --joint-prior-url "$JOINT_PRIOR_URL" \
-  --destination "$HOME/.local/share/datafarm-pyroki"
-export DATAFARM_ASSET_DIR="$HOME/.local/share/datafarm-pyroki"
+uv run --no-dev python scripts/fetch_assets.py
+# Optional cache override; the same location must be used when loading:
+HF_HUB_CACHE="$HOME/.cache/datafarm-hub" uv run --no-dev python scripts/fetch_assets.py
 ```
 
-Set the two URLs to the published artifact locations. No Hugging Face repository
-is assumed. Explicit checkpoint paths take precedence over `DATAFARM_ASSET_DIR`;
-otherwise loaders use the local source asset folder. Provenance and license notices
-remain tracked. Inference needs no CUDA or upstream DATAFARM/cuRobo installation.
-The default JAX installation uses CPU.
+```python
+from datafarm_pyroki import load_encoder, load_joint_prior
+
+encoder = load_encoder(local_files_only=True)  # requires an existing HF cache entry
+prior = load_joint_prior(cache_dir="/path/to/hub-cache")
+```
+
+`HF_HUB_OFFLINE=1` also enables cache-only loading. Explicit NPZ paths still load
+custom models directly: `load_encoder("my_encoder.npz")` or
+`load_joint_prior("my_prior.npz")`. Default loading no longer checks
+`DATAFARM_ASSET_DIR` or source-tree checkpoint files. Existing local artifacts stay
+on disk and can be used through explicit paths.
+
+Checkpoint binaries are **excluded from Git and package builds**. Provenance and
+license notices remain tracked. Inference needs no CUDA or upstream DATAFARM/cuRobo
+installation; the default JAX installation uses CPU.
 
 ## Encoder API
 
@@ -151,7 +164,7 @@ No examples execute a robot.
 ```python
 from datafarm_pyroki import load_joint_prior, select_ik_solution
 
-prior = load_joint_prior()  # separately obtained DROID joint-configuration GMM
+prior = load_joint_prior()  # pinned DROID GMM from Hugging Face (cached after download)
 selected = select_ik_solution(
     prior,
     ik_candidates,  # [..., candidates, robot_joints]
@@ -248,14 +261,14 @@ option applies before stroke retiming.
 
 ## Checkpoint provenance and reproduction
 
-The local encoder artifact is
-`src/datafarm_pyroki/assets/droid_encoder.npz`, with original source/checksums tracked in
-`src/datafarm_pyroki/assets/provenance.json`. The joint prior has its own tracked
+The default Hub revisions and SHA256 hashes are pinned in
+`src/datafarm_pyroki/assets.py`. Original source/checksums are tracked in
+`src/datafarm_pyroki/assets/provenance.json`; the joint prior has its own
 `joint_prior_provenance.json`. Neither binary is committed or packaged. All
 state_dict tensors, including normalization buffers, latent log-variance and
-auxiliary-head parameters, are preserved. The optional
-conversion tool reads the verified upstream PyTorch checkpoint and writes a
-pickle-free NPZ:
+auxiliary-head parameters, are preserved. Optional conversion tools reproduce
+pickle-free NPZs from verified upstream sources for development or custom use:
+
 
 ```sh
 uv run python scripts/convert_checkpoint.py
@@ -276,6 +289,13 @@ uv run --extra planning pytest
 uv run ruff check .
 uv run ruff format --check .
 ```
+
+Tests normally resolve their checkpoints from the same pinned Hub repositories.
+CI with an `HF_TOKEN` repository secret exercises that path. Without a secret, CI
+reproduces parity fixtures from the pinned public upstream sources and passes
+them through the test-only `DATAFARM_TEST_ASSET_DIR` setting; production loaders
+never use that setting. Hub resolution, authentication/offline errors, explicit
+path overrides and checksum rejection have dedicated tests.
 
 Tests compare the released PyTorch model against JAX for latent means, log
 variances, auxiliary outputs, padded masks, preprocessing, costs and waypoint

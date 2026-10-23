@@ -3,13 +3,25 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --frozen --extra planning
       - run: uv run --frozen ruff check .
       - run: uv run --frozen ruff format --check .
-      # Model binaries are never committed. Reproduce the pinned artifacts for parity tests.
-      - run: uv run --frozen python scripts/convert_checkpoint.py
-      - run: uv run --frozen python scripts/convert_joint_prior.py
+      - name: Prepare model checkpoints
+        shell: bash
+        run: |
+          if [ -n "$HF_TOKEN" ]; then
+            uv run --frozen python scripts/fetch_assets.py
+          else
+            # Private Hub access is optional for contributors and fork PRs.
+            # Build numerical parity fixtures from the pinned public upstream sources.
+            fixture_dir="$RUNNER_TEMP/datafarm-parity-fixtures"
+            uv run --frozen python scripts/convert_checkpoint.py --output "$fixture_dir/droid_encoder.npz"
+            uv run --frozen python scripts/convert_joint_prior.py --output "$fixture_dir/droid_joint_prior.npz"
+            echo "DATAFARM_TEST_ASSET_DIR=$fixture_dir" >> "$GITHUB_ENV"
+          fi
       - run: uv run --frozen --extra planning pytest

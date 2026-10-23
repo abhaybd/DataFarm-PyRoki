@@ -14,7 +14,11 @@ from datafarm_pyroki import load_encoder
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--positions", type=Path, help="NPY array [time,model_joints], radians")
-    parser.add_argument("--checkpoint", type=Path, help="Converted NPZ; default is bundled DROID")
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        help="Explicit NPZ; default downloads the pinned DROID encoder from Hugging Face",
+    )
     parser.add_argument("--dt", type=float, default=0.15, help="Input waypoint timestep, seconds")
     args = parser.parse_args()
     encoder = load_encoder(args.checkpoint)

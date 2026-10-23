@@ -229,9 +229,25 @@ class MotionEncoder:
         return jnp.sum(residual**2, axis=-1)
 
 
-def load_encoder(path: str | Path | None = None) -> MotionEncoder:
-    """Load an external NumPy checkpoint (pickle disabled), defaulting to local DROID weights."""
-    with open_model_asset("droid_encoder.npz", path) as stream:
+def load_encoder(
+    path: str | Path | None = None,
+    *,
+    cache_dir: str | Path | None = None,
+    token: str | bool | None = None,
+    local_files_only: bool = False,
+) -> MotionEncoder:
+    """Load the pinned HF encoder, or an explicit pickle-free NPZ for another model.
+
+    HF login/HF_TOKEN is used by default. cache_dir overrides the Hub cache;
+    local_files_only requires the pinned checkpoint to have been cached already.
+    """
+    with open_model_asset(
+        "droid_encoder.npz",
+        path,
+        cache_dir=cache_dir,
+        token=token,
+        local_files_only=local_files_only,
+    ) as stream:
         with np.load(stream, allow_pickle=False) as blob:
             if int(blob["schema_version"]) != 1:
                 raise ValueError("Unsupported encoder checkpoint schema")
