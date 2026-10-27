@@ -1,5 +1,9 @@
 # DataFarm-PyRoki
 
+[Original DATAFARM repository](https://github.com/SamratSahoo/DATAFARM) ·
+[Paper](https://arxiv.org/abs/2609.12316) ·
+[Project website](https://prpl-group.com/datafarm/)
+
 A JAX port of DATAFARM's frozen motion encoder with pretrained weight loading, plus a
 whole-motion-leg residual and constrained trajectory solver for PyRoki, followed
 by JAX stroke retiming and joint-density-based IK selection.
@@ -336,3 +340,31 @@ non-commercial research or evaluation. That asset has separate provenance and
 license notices alongside the local/downloaded weights. It does not relicense your
 independently trained priors. The code package is MIT-licensed. PyRoki and jaxls
 remain separate optional dependencies under their respective licenses.
+
+## Citation
+
+If you use this port, please cite the software and the original
+[DATAFARM paper](https://arxiv.org/abs/2609.12316).
+
+```bibtex
+@software{deshpande2026datafarmpyroki,
+  author  = {Deshpande, Abhay},
+  title   = {{DataFarm-PyRoki}: A {JAX} Port of {DATAFARM} for {PyRoki}},
+  year    = {2026},
+  version = {0.1.0},
+  url     = {https://github.com/abhaybd/DataFarm-PyRoki}
+}
+
+@article{sahoo2026datafarm,
+  author        = {Sahoo, Samrat and Huang, Yixuan and Silver, Tom},
+  title         = {{DATAFARM}: Distribution-Aligned Task and Motion Planning
+                   for Fine-Tuning Vision-Language-Action Models},
+  journal       = {arXiv preprint arXiv:2609.12316},
+  year          = {2026},
+  eprint        = {2609.12316},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.RO},
+  doi           = {10.48550/arXiv.2609.12316},
+  url           = {https://arxiv.org/abs/2609.12316}
+}
+```
