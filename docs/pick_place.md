@@ -46,9 +46,8 @@ The default output folder is `work/pick-place-comparison/`:
 - `scene.xml` and `robot.urdf`: the generated simulation and planning models.
 
 Full-resolution videos, binary trajectories and downloaded assets remain in
-ignored local `work/` directories. A compressed 480p comparison and its thumbnail
-are included in `docs/assets/` for the README. The robot meshes are fetched once
-from a pinned
+ignored local `work/` directories. The README embeds a compressed 480p comparison
+hosted as a GitHub attachment. The robot meshes are fetched once from a pinned
 [MuJoCo Menagerie revision](https://github.com/google-deepmind/mujoco_menagerie/tree/cda5236f98383f6fbaa4820c6b18dba892cd087f).
 Downloads verify Git blob hashes. The upstream Franka Apache-2.0 and Robotiq BSD
 license files are kept with the downloaded models. Mesh binaries are not committed.

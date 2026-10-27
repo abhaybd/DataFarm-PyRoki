@@ -8,7 +8,7 @@ A JAX port of DATAFARM's frozen motion encoder with pretrained weight loading, p
 whole-motion-leg residual and constrained trajectory solver for PyRoki, followed
 by JAX trajectory segment retiming and joint-density-based IK selection.
 
-[![Watch the pick-and-place comparison](docs/assets/pick-place-comparison.jpg)](docs/assets/pick-place-comparison.mp4)
+https://github.com/user-attachments/assets/6ad5163d-79ff-4676-b148-c5c29aa86c72
 
 ## Getting Started
 
