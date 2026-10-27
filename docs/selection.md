@@ -61,8 +61,8 @@ numbers of joints/components and coexist without shared global state.
 
 `load_joint_prior()` resolves the pinned artifact from
 [abhaybd/DataFarm-Jax-PosturePrior-Franka](https://huggingface.co/abhaybd/DataFarm-Jax-PosturePrior-Franka),
-verifies its SHA256, and reuses the standard Hugging Face cache. Use `hf auth login`,
-`HF_TOKEN`, or `token=` for private-repository access. `cache_dir=` selects another
+verifies its SHA256, and reuses the standard Hugging Face cache. The model is public
+and downloads without authentication. `cache_dir=` selects another
 Hub cache; `local_files_only=True` requires an existing cache entry. `HF_HUB_OFFLINE=1`
 provides the corresponding environment setting. An explicit NPZ path bypasses the
 Hub and allows another trained model; source-tree artifacts and `DATAFARM_ASSET_DIR`

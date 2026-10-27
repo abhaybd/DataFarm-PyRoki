@@ -6,7 +6,7 @@ from importlib.resources import files
 from unittest.mock import Mock
 
 import pytest
-from huggingface_hub.errors import LocalEntryNotFoundError, RepositoryNotFoundError
+from huggingface_hub.errors import LocalEntryNotFoundError
 
 from datafarm_pyroki import assets as model_assets
 from datafarm_pyroki import load_encoder, load_joint_prior
@@ -41,10 +41,11 @@ def test_loaders_use_pinned_hub_and_forward_options(
         assert loaded.spec.n_joints == 7
     else:
         assert len(loaded.joint_names) == 7
-    # Calling without any options also resolves through the Hub.
+    # Public downloads remain anonymous even when HF_TOKEN is configured.
     download.reset_mock()
+    monkeypatch.setenv("HF_TOKEN", "unused-token")
     loader()
-    assert download.call_args.kwargs["token"] is None
+    assert download.call_args.kwargs["token"] is False
     assert download.call_args.kwargs["local_files_only"] is False
 
 
@@ -86,18 +87,7 @@ def test_missing_explicit_file_does_not_fall_back(monkeypatch, tmp_path):
     download.assert_not_called()
 
 
-def test_auth_and_offline_failures_are_actionable(monkeypatch):
-    monkeypatch.setattr(
-        model_assets,
-        "hf_hub_download",
-        Mock(
-            side_effect=RepositoryNotFoundError(
-                "private repo", response=Mock(headers={}, request=None)
-            )
-        ),
-    )
-    with pytest.raises(RuntimeError, match="hf auth login"):
-        load_encoder()
+def test_offline_failure_is_actionable(monkeypatch):
     monkeypatch.setattr(
         model_assets, "hf_hub_download", Mock(side_effect=LocalEntryNotFoundError("not cached"))
     )

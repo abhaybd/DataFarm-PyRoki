@@ -133,12 +133,12 @@ def load_joint_prior(
     path: str | Path | None = None,
     *,
     cache_dir: str | Path | None = None,
-    token: str | bool | None = None,
+    token: str | bool | None = False,
     local_files_only: bool = False,
 ) -> JointPositionPrior:
     """Load the pinned HF posture GMM, or an explicit pickle-free NPZ for another model.
 
-    HF login/HF_TOKEN is used by default. cache_dir overrides the Hub cache;
+    Public weights download anonymously. cache_dir overrides the Hub cache;
     local_files_only requires the pinned checkpoint to have been cached already.
     """
     with open_model_asset(

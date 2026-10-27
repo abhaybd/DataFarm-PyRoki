@@ -7,7 +7,6 @@ poses and the task sequence are specified by the example; it does not use percep
 
 ```sh
 uv sync --extra planning --extra simulation
-uv run hf auth login  # required while the two model repositories are private
 uv run --extra planning --extra simulation python examples/pick_place.py --compare
 ```
 

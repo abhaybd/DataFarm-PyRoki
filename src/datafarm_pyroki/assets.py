@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from huggingface_hub import hf_hub_download
-from huggingface_hub.errors import LocalEntryNotFoundError, RepositoryNotFoundError
+from huggingface_hub.errors import LocalEntryNotFoundError
 
 
 @dataclass(frozen=True)
@@ -37,12 +37,12 @@ def resolve_model_asset(
     path: str | Path | None = None,
     *,
     cache_dir: str | Path | None = None,
-    token: str | bool | None = None,
+    token: str | bool | None = False,
     local_files_only: bool = False,
 ) -> Path:
     """Use an explicit file, otherwise download/check a pinned artifact in the HF cache.
 
-    None for token uses the normal HF login/HF_TOKEN discovery. Explicit paths
+    Public models download anonymously by default. Explicit paths
     bypass the Hub, its cache and its checksum contract, allowing custom models.
     local_files_only applies to Hub resolution and requires an already cached file.
     """
@@ -60,15 +60,10 @@ def resolve_model_asset(
                 local_files_only=local_files_only,
             )
         )
-    except RepositoryNotFoundError as error:
-        raise RuntimeError(
-            f"Cannot access {spec.repo_id}. For private models, run `hf auth login`, "
-            "set HF_TOKEN to a token with read access, or pass token= to the loader."
-        ) from error
     except LocalEntryNotFoundError as error:
         raise FileNotFoundError(
             f"{spec.repo_id}/{filename} at revision {spec.revision} is not cached. "
-            "Load once with network access and HF authentication, then use "
+            "Load once with network access, then use "
             "local_files_only=True or HF_HUB_OFFLINE=1 for offline loading."
         ) from error
     with resource.open("rb") as stream:

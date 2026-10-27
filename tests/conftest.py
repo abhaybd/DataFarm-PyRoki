@@ -1,6 +1,3 @@
-import os
-from pathlib import Path
-
 import numpy as np
 import pytest
 
@@ -8,21 +5,14 @@ from datafarm_pyroki import load_encoder
 from datafarm_pyroki.assets import resolve_model_asset
 
 
-def _checkpoint(filename):
-    # CI without private Hub access may supply independently converted parity
-    # fixtures. Production loaders never consult this test-only environment variable.
-    directory = os.environ.get("DATAFARM_TEST_ASSET_DIR")
-    return Path(directory) / filename if directory else resolve_model_asset(filename)
-
-
 @pytest.fixture(scope="session")
 def encoder_checkpoint():
-    return _checkpoint("droid_encoder.npz")
+    return resolve_model_asset("droid_encoder.npz")
 
 
 @pytest.fixture(scope="session")
 def joint_prior_checkpoint():
-    return _checkpoint("droid_joint_prior.npz")
+    return resolve_model_asset("droid_joint_prior.npz")
 
 
 @pytest.fixture(scope="session")

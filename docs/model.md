@@ -52,8 +52,8 @@ not a claim of bitwise equality between frameworks.
 `load_encoder()` downloads `droid_encoder.npz` from
 [abhaybd/DataFarm-Jax-MotionEncoder-Franka](https://huggingface.co/abhaybd/DataFarm-Jax-MotionEncoder-Franka)
 at the revision pinned in `assets.py`, verifies its SHA256, and uses the standard
-Hugging Face cache. Use `hf auth login`/`HF_TOKEN` or `token=` for private access,
-`cache_dir=` to override the Hub cache, and `local_files_only=True` to load an
+Hugging Face cache. The model is public and downloads without authentication.
+Use `cache_dir=` to override the Hub cache and `local_files_only=True` to load an
 already cached model without network access. Explicit NPZ paths bypass Hub
 resolution so custom trained models still work. Binary files under the source
 asset folder are not consulted by default.

@@ -15,21 +15,19 @@ jaxls to tested Git revisions.
 
 ```sh
 uv sync --extra planning
-# These model repositories are currently private; authenticate once:
-uv run hf auth login
 uv run python examples/score_motion.py
 uv run --extra planning pytest
 ```
 
-`load_encoder()` and `load_joint_prior()` now download their default weights from:
+`load_encoder()` and `load_joint_prior()` download their default weights from:
 
 - [abhaybd/DataFarm-Jax-MotionEncoder-Franka](https://huggingface.co/abhaybd/DataFarm-Jax-MotionEncoder-Franka)
 - [abhaybd/DataFarm-Jax-PosturePrior-Franka](https://huggingface.co/abhaybd/DataFarm-Jax-PosturePrior-Franka)
 
 Downloads use pinned commit revisions, verify SHA256 against the released
-artifacts, and are reused from the standard Hugging Face cache. Authenticate with
-`hf auth login`, set `HF_TOKEN` to a token with read access to both repositories,
-or pass `token=` to a loader. Inference needs neither PyTorch nor planning extras:
+artifacts, and are reused from the standard Hugging Face cache. Both models are
+public and download without authentication. Inference needs neither PyTorch nor
+planning extras:
 
 ```sh
 uv sync --no-dev
@@ -311,12 +309,9 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-Tests normally resolve their checkpoints from the same pinned Hub repositories.
-CI with an `HF_TOKEN` repository secret exercises that path. Without a secret, CI
-reproduces parity fixtures from the pinned public upstream sources and passes
-them through the test-only `DATAFARM_TEST_ASSET_DIR` setting; production loaders
-never use that setting. Hub resolution, authentication/offline errors, explicit
-path overrides and checksum rejection have dedicated tests.
+Tests and CI resolve their checkpoints from the same pinned public Hub
+repositories without authentication or repository secrets. Hub resolution,
+offline errors, explicit path overrides and checksum rejection have dedicated tests.
 
 Tests compare the released PyTorch model against JAX for latent means, log
 variances, auxiliary outputs, padded masks, preprocessing, costs and waypoint

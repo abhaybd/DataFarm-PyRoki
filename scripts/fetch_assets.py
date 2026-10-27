@@ -1,6 +1,6 @@
 """Prefetch the pinned Hugging Face models into the standard Hub cache.
 
-Authenticate with `uv run hf auth login` or HF_TOKEN for private repositories.
+The public models download without authentication.
 Normal load_encoder()/load_joint_prior() calls fetch the same artifacts on demand.
 """
 
