@@ -13,6 +13,8 @@ import pyroki as pk
 
 from .embodiment import JointMap
 from .encoder import MotionEncoder, sample_count
+from .inverse_kinematics import IKCandidates as IKCandidates
+from .inverse_kinematics import make_ik_solver as make_ik_solver
 
 
 def make_motion_cost(
@@ -64,6 +66,251 @@ class InfeasibleTrajectoryError(RuntimeError):
     """The local optimizer did not return a trajectory satisfying the requested constraints."""
 
 
+class LegSolver:
+    """A reusable leg optimizer; runtime context changes do not rebuild its cost graph."""
+
+    def __init__(
+        self,
+        optimize,
+        robot,
+        encoder,
+        joint_map,
+        timesteps,
+        source_dt,
+        rest_endpoints,
+        constraint_tolerance,
+    ):
+        self._optimize = optimize
+        self.robot, self.encoder, self.joint_map = robot, encoder, joint_map
+        self.timesteps, self.source_dt = timesteps, source_dt
+        self.rest_endpoints, self.constraint_tolerance = rest_endpoints, constraint_tolerance
+
+    def __call__(self, start_cfg, goal_cfg, *, initial_waypoints=None, context=None):
+        dof = len(self.joint_map.robot_joint_names)
+        start, goal = (
+            jnp.asarray(start_cfg, dtype=jnp.float32),
+            jnp.asarray(goal_cfg, dtype=jnp.float32),
+        )
+        if start.shape != (dof,) or goal.shape != (dof,):
+            raise ValueError(f"start_cfg and goal_cfg must have shape ({dof},)")
+        initial = (
+            jnp.linspace(start, goal, self.timesteps)
+            if initial_waypoints is None
+            else jnp.asarray(initial_waypoints, dtype=jnp.float32)
+        )
+        if initial.shape != (self.timesteps, dof):
+            raise ValueError(f"initial_waypoints must have shape ({self.timesteps},{dof})")
+        if not all(np.isfinite(x).all() for x in (start, goal, initial)):
+            raise ValueError("Configurations must be finite")
+        for endpoint in (start, goal):
+            full = np.asarray(self.robot.joints.get_full_config(endpoint))
+            if np.any(
+                full < np.asarray(self.robot.joints.lower_limits_all) - self.constraint_tolerance
+            ) or np.any(
+                full > np.asarray(self.robot.joints.upper_limits_all) + self.constraint_tolerance
+            ):
+                raise InfeasibleTrajectoryError("An endpoint violates joint limits")
+        initial = initial.at[0].set(start).at[-1].set(goal)
+        if self.rest_endpoints:
+            initial = initial.at[1].set(start).at[-2].set(goal)
+        result, violation = self._optimize(initial, context)
+        violation = float(violation)
+        if (
+            not np.isfinite(result).all()
+            or not np.isfinite(violation)
+            or violation > self.constraint_tolerance
+        ):
+            raise InfeasibleTrajectoryError(
+                f"Constraint violation {violation:.6g} exceeds tolerance "
+                f"{self.constraint_tolerance}"
+            )
+        return LegResult(
+            result,
+            self.source_dt,
+            float(self.encoder.cost(self.joint_map.select(initial), self.source_dt)),
+            float(self.encoder.cost(self.joint_map.select(result), self.source_dt)),
+            violation,
+        )
+
+
+def make_leg_solver(
+    robot: pk.Robot,
+    encoder: MotionEncoder,
+    *,
+    joint_map: JointMap,
+    source_dt: float,
+    timesteps: int = 32,
+    encoder_weight: float = 1.0,
+    smoothness_weight: float = 1.0,
+    acceleration_weight: float = 0.1,
+    acceleration_limits=None,
+    robot_coll=None,
+    world_coll=(),
+    collision_margin: float = 0.02,
+    rest_endpoints: bool = True,
+    extra_costs: Callable | None = None,
+    max_iterations: int = 50,
+    constraint_tolerance: float = 2e-3,
+    verbose: bool = False,
+) -> LegSolver:
+    """Build once, then solve legs with different endpoints, seeds, and task context.
+
+    ``extra_costs(waypoints, context)`` supplies application-specific jaxls costs.
+    Context is a JAX PyTree of runtime values (for example target TCP poses).
+    Repeated calls with the same shapes/dtypes reuse JAX's compiled solve.
+    Weights multiply squared costs. Set encoder_weight=0 for a baseline solve.
+    """
+    if tuple(robot.joints.actuated_names) != joint_map.robot_joint_names:
+        raise ValueError("JointMap must use the robot's actuated joint order")
+    if joint_map.model_joint_names != encoder.spec.joint_names:
+        raise ValueError("JointMap does not match this model's ordered joint names")
+    sample_count(timesteps, source_dt, encoder.spec.sample_rate_hz)
+    if timesteps < 3 or (rest_endpoints and timesteps < 4):
+        raise ValueError("The leg solver needs at least three waypoints (four with rest_endpoints)")
+    if world_coll and robot_coll is None:
+        raise ValueError("World collisions require a RobotCollision model")
+    if any(
+        not np.isfinite(w) or w < 0
+        for w in (encoder_weight, smoothness_weight, acceleration_weight, collision_margin)
+    ):
+        raise ValueError("Weights and collision margin must be nonnegative and finite")
+    if not np.isfinite(constraint_tolerance) or constraint_tolerance <= 0 or max_iterations <= 0:
+        raise ValueError("constraint_tolerance and max_iterations must be positive")
+    if acceleration_limits is not None:
+        acceleration_limits = jnp.asarray(acceleration_limits)
+        dof = len(joint_map.robot_joint_names)
+        if (
+            acceleration_limits.shape != (dof,)
+            or not np.isfinite(acceleration_limits).all()
+            or np.any(acceleration_limits <= 0)
+        ):
+            raise ValueError("acceleration_limits must contain one positive finite limit per joint")
+
+    @jax.jit
+    def optimize(initial, context):
+        batched_vars = robot.joint_var_cls(jnp.arange(timesteps))
+        waypoints = tuple(robot.joint_var_cls(i) for i in range(timesteps))
+        costs = [
+            pk.costs.limit_constraint(jax.tree.map(lambda x: x[None], robot), batched_vars),
+            pk.costs.limit_velocity_constraint(
+                jax.tree.map(lambda x: x[None], robot),
+                robot.joint_var_cls(jnp.arange(1, timesteps)),
+                robot.joint_var_cls(jnp.arange(timesteps - 1)),
+                source_dt,
+            ),
+            pk.costs.smoothness_cost(
+                robot.joint_var_cls(jnp.arange(1, timesteps)),
+                robot.joint_var_cls(jnp.arange(timesteps - 1)),
+                jnp.sqrt(smoothness_weight),
+            ),
+        ]
+
+        if encoder_weight > 0:
+            costs.insert(
+                0,
+                make_motion_cost(
+                    encoder,
+                    waypoints,
+                    source_dt=source_dt,
+                    weight=encoder_weight,
+                    joint_map=joint_map,
+                ),
+            )
+
+        start, goal = initial[0], initial[-1]
+
+        @jaxls.Cost.factory(kind="constraint_eq_zero", name="fixed_endpoint")
+        def fixed_endpoint(vals, var, target):
+            return vals[var] - target
+
+        for index in (0, 1) if rest_endpoints else (0,):
+            costs.append(fixed_endpoint(waypoints[index], start))
+        for index in (timesteps - 2, timesteps - 1) if rest_endpoints else (timesteps - 1,):
+            costs.append(fixed_endpoint(waypoints[index], goal))
+
+        def acceleration(vals, a, b, c):
+            return (vals[c] - 2 * vals[b] + vals[a]) / source_dt**2
+
+        acc_args = (
+            robot.joint_var_cls(jnp.arange(timesteps - 2)),
+            robot.joint_var_cls(jnp.arange(1, timesteps - 1)),
+            robot.joint_var_cls(jnp.arange(2, timesteps)),
+        )
+        costs.append(_acceleration_cost(acceleration, acc_args, acceleration_weight))
+        if acceleration_limits is not None:
+
+            @jaxls.Cost.factory(kind="constraint_leq_zero", name="acceleration_limit")
+            def acceleration_limit(vals, a, b, c):
+                return jnp.abs(acceleration(vals, a, b, c)) - acceleration_limits
+
+            costs.append(acceleration_limit(*acc_args))
+
+        if robot_coll is not None:
+
+            @jaxls.Cost.factory(kind="constraint_leq_zero", name="self_collision")
+            def self_collision(vals, var):
+                return (
+                    collision_margin - robot_coll.compute_self_collision_distance(robot, vals[var])
+                ).reshape(-1)
+
+            costs.append(self_collision(batched_vars))
+
+            @jaxls.Cost.factory(kind="constraint_leq_zero", name="world_collision_sweep")
+            def world_collision(vals, previous, current, obstacle):
+                capsules = robot_coll.get_swept_capsules(robot, vals[previous], vals[current])
+                distance = pk.collision.collide(
+                    capsules.reshape((-1, 1)), obstacle.reshape((1, -1))
+                )
+                return (collision_margin - distance).reshape(-1)
+
+            for obstacle in world_coll:
+                costs.append(
+                    world_collision(
+                        robot.joint_var_cls(jnp.arange(timesteps - 1)),
+                        robot.joint_var_cls(jnp.arange(1, timesteps)),
+                        jax.tree.map(lambda x: x[None], obstacle),
+                    )
+                )
+
+        if extra_costs is not None:
+            costs.extend(extra_costs(waypoints, context))
+        problem = jaxls.LeastSquaresProblem(costs=costs, variables=[batched_vars]).analyze()
+        solution = problem.solve(
+            initial_vals=jaxls.VarValues.make((batched_vars.with_value(initial),)),
+            termination=jaxls.TerminationConfig(max_iterations=max_iterations),
+            verbose=verbose,
+        )
+        # Return the requested boundaries exactly, then recheck every constraint
+        # on that path. Projection can affect adjacent velocities/collisions.
+        result = solution[batched_vars].at[0].set(start).at[-1].set(goal)
+        if rest_endpoints:
+            result = result.at[1].set(start).at[-2].set(goal)
+        checked = jaxls.VarValues.make((batched_vars.with_value(result),))
+        violation = jnp.array(0.0)
+        for cost in costs:
+            if cost.kind == "l2_squared":
+                continue
+            residual = _evaluate_cost(cost, checked)
+            if cost.kind == "constraint_eq_zero":
+                residual = jnp.abs(residual)
+            elif cost.kind == "constraint_geq_zero":
+                residual = -residual
+            value = jnp.max(residual, initial=0.0)
+            violation = jnp.maximum(violation, jnp.where(jnp.isfinite(value), value, jnp.inf))
+        return result, violation
+
+    return LegSolver(
+        optimize,
+        robot,
+        encoder,
+        joint_map,
+        timesteps,
+        source_dt,
+        rest_endpoints,
+        constraint_tolerance,
+    )
+
+
 def solve_leg(
     robot: pk.Robot,
     encoder: MotionEncoder,
@@ -87,176 +334,36 @@ def solve_leg(
     constraint_tolerance: float = 2e-3,
     verbose: bool = False,
 ) -> LegResult:
-    """Refine one motion leg with fixed joint endpoints and a frozen motion-style cost.
+    """Refine a single leg. Use make_leg_solver when solving many legs of one shape.
 
-    This replaces the waypoint-optimization stage, not task planning, IK, gripper
-    scheduling, or trajectory segment retiming. Supply the actual start and an already selected
-    goal (e.g. from your endpoint prior). The uniform waypoint clock stays fixed.
-
-    Self collisions are constrained at waypoints; world collisions use PyRoki's
-    swept-capsule approximation. Add task/attached-object constraints through
-    extra_costs, and perform application-specific continuous feasibility checks.
-    No robot execution occurs here. A rejected solve raises, never returns success.
+    Task/attached-object costs come from extra_costs(waypoints). Collision checking
+    uses the configured PyRoki geometry; applications must validate their own scene.
     """
-    robot_names = tuple(robot.joints.actuated_names)
-    dof = len(robot_names)
-    if robot_names != joint_map.robot_joint_names:
-        raise ValueError("JointMap must use the robot's actuated joint order")
-    start = jnp.asarray(start_cfg, dtype=jnp.float32)
-    goal = jnp.asarray(goal_cfg, dtype=jnp.float32)
-    if start.shape != (dof,) or goal.shape != (dof,):
-        raise ValueError(f"start_cfg and goal_cfg must have shape ({dof},)")
-    if initial_waypoints is None:
-        initial = jnp.linspace(start, goal, timesteps)
-    else:
-        initial = jnp.asarray(initial_waypoints, dtype=jnp.float32)
-        if initial.ndim != 2 or initial.shape[1] != dof:
+    if initial_waypoints is not None:
+        initial_waypoints = jnp.asarray(initial_waypoints)
+        if initial_waypoints.ndim != 2:
             raise ValueError("initial_waypoints must have shape [time,robot_dof]")
-        timesteps = initial.shape[0]
-    sample_count(timesteps, source_dt, encoder.spec.sample_rate_hz)
-    if timesteps < 3:
-        raise ValueError("The leg solver needs at least three waypoints")
-    if rest_endpoints and timesteps < 4:
-        raise ValueError("rest_endpoints requires at least four waypoints")
-    if (
-        not np.isfinite(initial).all()
-        or not np.isfinite(start).all()
-        or not np.isfinite(goal).all()
-    ):
-        raise ValueError("Configurations must be finite")
-    if world_coll and robot_coll is None:
-        raise ValueError("World collisions require a RobotCollision model")
-    if any(
-        not np.isfinite(w) or w < 0
-        for w in (encoder_weight, smoothness_weight, acceleration_weight, collision_margin)
-    ):
-        raise ValueError("Weights and collision margin must be nonnegative and finite")
-    if constraint_tolerance <= 0 or max_iterations <= 0:
-        raise ValueError("constraint_tolerance and max_iterations must be positive")
-    if acceleration_limits is not None:
-        acceleration_limits = jnp.asarray(acceleration_limits)
-        if (
-            acceleration_limits.shape != (dof,)
-            or not np.isfinite(acceleration_limits).all()
-            or np.any(acceleration_limits <= 0)
-        ):
-            raise ValueError("acceleration_limits must contain one positive finite limit per joint")
-
-    # Reject impossible endpoints before paying for an encoder Jacobian compilation.
-    for endpoint in (start, goal):
-        full = np.asarray(robot.joints.get_full_config(endpoint))
-        if np.any(
-            full < np.asarray(robot.joints.lower_limits_all) - constraint_tolerance
-        ) or np.any(full > np.asarray(robot.joints.upper_limits_all) + constraint_tolerance):
-            raise InfeasibleTrajectoryError("An endpoint violates joint limits")
-
-    initial = initial.at[0].set(start).at[-1].set(goal)
-    if rest_endpoints:
-        initial = initial.at[1].set(start).at[-2].set(goal)
-    batched_vars = robot.joint_var_cls(jnp.arange(timesteps))
-    waypoints = tuple(robot.joint_var_cls(i) for i in range(timesteps))
-    costs = [
-        make_motion_cost(
-            encoder, waypoints, source_dt=source_dt, weight=encoder_weight, joint_map=joint_map
-        ),
-        pk.costs.limit_constraint(jax.tree.map(lambda x: x[None], robot), batched_vars),
-        pk.costs.limit_velocity_constraint(
-            jax.tree.map(lambda x: x[None], robot),
-            robot.joint_var_cls(jnp.arange(1, timesteps)),
-            robot.joint_var_cls(jnp.arange(timesteps - 1)),
-            source_dt,
-        ),
-        pk.costs.smoothness_cost(
-            robot.joint_var_cls(jnp.arange(1, timesteps)),
-            robot.joint_var_cls(jnp.arange(timesteps - 1)),
-            jnp.sqrt(smoothness_weight),
-        ),
-    ]
-
-    @jaxls.Cost.factory(kind="constraint_eq_zero", name="fixed_endpoint")
-    def fixed_endpoint(vals, var, target):
-        return vals[var] - target
-
-    for index in (0, 1) if rest_endpoints else (0,):
-        costs.append(fixed_endpoint(waypoints[index], start))
-    for index in (timesteps - 2, timesteps - 1) if rest_endpoints else (timesteps - 1,):
-        costs.append(fixed_endpoint(waypoints[index], goal))
-
-    def acceleration(vals, a, b, c):
-        return (vals[c] - 2 * vals[b] + vals[a]) / source_dt**2
-
-    acc_args = (
-        robot.joint_var_cls(jnp.arange(timesteps - 2)),
-        robot.joint_var_cls(jnp.arange(1, timesteps - 1)),
-        robot.joint_var_cls(jnp.arange(2, timesteps)),
-    )
-    costs.append(_acceleration_cost(acceleration, acc_args, acceleration_weight))
-    if acceleration_limits is not None:
-
-        @jaxls.Cost.factory(kind="constraint_leq_zero", name="acceleration_limit")
-        def acceleration_limit(vals, a, b, c):
-            return jnp.abs(acceleration(vals, a, b, c)) - acceleration_limits
-
-        costs.append(acceleration_limit(*acc_args))
-
-    if robot_coll is not None:
-
-        @jaxls.Cost.factory(kind="constraint_leq_zero", name="self_collision")
-        def self_collision(vals, var):
-            return (
-                collision_margin - robot_coll.compute_self_collision_distance(robot, vals[var])
-            ).reshape(-1)
-
-        costs.append(self_collision(batched_vars))
-
-        @jaxls.Cost.factory(kind="constraint_leq_zero", name="world_collision_sweep")
-        def world_collision(vals, previous, current, obstacle):
-            capsules = robot_coll.get_swept_capsules(robot, vals[previous], vals[current])
-            distance = pk.collision.collide(capsules.reshape((-1, 1)), obstacle.reshape((1, -1)))
-            return (collision_margin - distance).reshape(-1)
-
-        for obstacle in world_coll:
-            costs.append(
-                world_collision(
-                    robot.joint_var_cls(jnp.arange(timesteps - 1)),
-                    robot.joint_var_cls(jnp.arange(1, timesteps)),
-                    jax.tree.map(lambda x: x[None], obstacle),
-                )
-            )
-
-    if extra_costs is not None:
-        costs.extend(extra_costs(waypoints))
-    problem = jaxls.LeastSquaresProblem(costs=costs, variables=[batched_vars]).analyze()
-    solution = problem.solve(
-        initial_vals=jaxls.VarValues.make((batched_vars.with_value(initial),)),
-        termination=jaxls.TerminationConfig(max_iterations=max_iterations),
+        timesteps = len(initial_waypoints)
+    solver = make_leg_solver(
+        robot,
+        encoder,
+        joint_map=joint_map,
+        source_dt=source_dt,
+        timesteps=timesteps,
+        encoder_weight=encoder_weight,
+        smoothness_weight=smoothness_weight,
+        acceleration_weight=acceleration_weight,
+        acceleration_limits=acceleration_limits,
+        robot_coll=robot_coll,
+        world_coll=world_coll,
+        collision_margin=collision_margin,
+        rest_endpoints=rest_endpoints,
+        extra_costs=None if extra_costs is None else lambda points, context: extra_costs(points),
+        max_iterations=max_iterations,
+        constraint_tolerance=constraint_tolerance,
         verbose=verbose,
     )
-    # Check each constraint in its original convention: equality |r|, inequality signed.
-    violation = 0.0
-    for cost in costs:
-        if cost.kind == "l2_squared":
-            continue
-        residual = np.asarray(_evaluate_cost(cost, solution))
-        if not np.isfinite(residual).all():
-            raise InfeasibleTrajectoryError("Nonfinite constraint residual after optimization")
-        if cost.kind == "constraint_eq_zero":
-            residual = np.abs(residual)
-        elif cost.kind == "constraint_geq_zero":
-            residual = -residual
-        violation = max(violation, float(np.max(residual, initial=0)))
-    result = solution[batched_vars]
-    if not np.isfinite(result).all() or violation > constraint_tolerance:
-        raise InfeasibleTrajectoryError(
-            f"Constraint violation {violation:.6g} exceeds tolerance {constraint_tolerance}"
-        )
-    return LegResult(
-        result,
-        source_dt,
-        float(encoder.cost(joint_map.select(initial), source_dt)),
-        float(encoder.cost(joint_map.select(result), source_dt)),
-        violation,
-    )
+    return solver(start_cfg, goal_cfg, initial_waypoints=initial_waypoints)
 
 
 def _acceleration_cost(residual_fn, args, weight):

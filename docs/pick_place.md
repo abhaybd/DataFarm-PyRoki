@@ -5,6 +5,21 @@
 Panda arm with a Robotiq 2F-85 gripper, matching the DROID hardware layout. Object
 poses and the task sequence are specified by the example; it does not use perception.
 
+The example file shows the pick/place sequence and the steps to run it. Supporting
+modules contain the [planner](../examples/_pick_place_planning.py),
+[scene](../examples/_pick_place_scene.py), [timing](../examples/_pick_place_timing.py),
+[simulation and video](../examples/_pick_place_simulation.py), and
+[CLI and saved-plan handling](../examples/_pick_place_demo.py).
+The planner uses the package's reusable `make_ik_solver` and `make_leg_solver`;
+only this scene's collision policy and contact/table costs stay in the example.
+Interpolation, fixed-clock sampling and limit checking use `interpolate_plan`,
+`sample_plan` and `validate_trajectory`. See [integration](integration.md) for these
+APIs. The shared [playback helper](../examples/_simulation.py) accepts explicit
+joint/actuator/body mappings and callbacks for gripper events, observations and
+frame annotations. Cube contact rules and success checks remain in this demo.
+Video encoding uses ImageIO's PyAV backend; the simulation extra installs it
+without requiring a separate FFmpeg executable.
+
 ```sh
 uv sync --extra planning --extra simulation
 uv run --extra planning --extra simulation python examples/pick_place.py --compare
@@ -30,8 +45,10 @@ The default output folder is `work/pick-place-comparison/`:
   its gripper timestamps are recorded as `source_events` in `planning.json`.
 - `scene.xml` and `robot.urdf`: the generated simulation and planning models.
 
-The assets, binary trajectories and videos remain in ignored local `work/`
-directories. The robot meshes are fetched once from a pinned
+Full-resolution videos, binary trajectories and downloaded assets remain in
+ignored local `work/` directories. A compressed 480p comparison and its thumbnail
+are included in `docs/assets/` for the README. The robot meshes are fetched once
+from a pinned
 [MuJoCo Menagerie revision](https://github.com/google-deepmind/mujoco_menagerie/tree/cda5236f98383f6fbaa4820c6b18dba892cd087f).
 Downloads verify Git blob hashes. The upstream Franka Apache-2.0 and Robotiq BSD
 license files are kept with the downloaded models. Mesh binaries are not committed.

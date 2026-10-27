@@ -8,6 +8,67 @@ A JAX port of DATAFARM's frozen motion encoder with pretrained weight loading, p
 whole-motion-leg residual and constrained trajectory solver for PyRoki, followed
 by JAX trajectory segment retiming and joint-density-based IK selection.
 
+[![Watch the pick-and-place comparison](docs/assets/pick-place-comparison.jpg)](docs/assets/pick-place-comparison.mp4)
+
+## Getting Started
+
+Plan between two end-effector poses on a Franka using an existing PyRoki `robot`.
+Supply the end-effector link name `ee_link`, two poses `start_pose` and `goal_pose`
+as `[w, x, y, z, px, py, pz]` (unit quaternion, meters), an `ik_seeds` array shaped
+`[candidates, robot_joints]`, and per-joint `acceleration_limits` in rad/s².
+Joint arrays use actuated robot order; seed positions are in radians.
+
+```sh
+uv sync --extra planning
+```
+
+```python
+from datafarm_pyroki import JointMap, load_encoder, load_joint_prior
+from datafarm_pyroki import retime_trajectory_segment, select_ik_solution
+from datafarm_pyroki.integration import make_ik_solver, solve_leg
+
+encoder, prior = load_encoder(), load_joint_prior()
+joint_map = JointMap.from_names(robot.joints.actuated_names, encoder.spec.joint_names)
+ik = make_ik_solver(robot, ee_link)
+
+
+# 1. Solve IK and rank feasible solutions with the learned posture prior.
+def ranked_ik(pose):
+    candidates = ik(pose, ik_seeds)
+    return select_ik_solution(
+        prior, candidates.positions, joint_map=joint_map, feasible=candidates.feasible
+    ).positions
+
+
+# 2. Plan a joint-space path between the selected endpoints.
+leg = solve_leg(
+    robot,
+    encoder,
+    ranked_ik(start_pose),
+    ranked_ik(goal_pose),
+    joint_map=joint_map,
+    source_dt=0.1,
+)
+
+# 3. Retime the path with the learned motion cost and joint motion limits.
+trajectory = retime_trajectory_segment(
+    encoder,
+    leg.positions,
+    joint_map=joint_map,
+    original_duration=(len(leg.positions) - 1) * leg.source_dt,
+    output_dt=0.02,
+    velocity_limits=robot.joints.velocity_limits,
+    acceleration_limits=acceleration_limits,
+)
+```
+
+`trajectory.positions`, `.velocities`, `.accelerations` and `.times` contain the
+retimed motion, starting and ending at rest. If URDF joint names differ from the
+encoder's, pass `aliases=` to `JointMap.from_names`. For scene collision checks,
+pass `feasibility=collision_free` to `ik` and `robot_coll`/`world_coll` to
+`solve_leg`. See [planning utilities](docs/integration.md) for setup and options,
+or the [pick-and-place demo](docs/pick_place.md) for a complete simulation.
+
 ## Setup
 
 Python and dependencies are managed with **uv**. The lockfile pins PyRoki and
@@ -153,6 +214,11 @@ result = solve_leg(
 q_optimized = result.positions  # robot joint order; clock remains source_dt
 ```
 
+For repeated legs, `make_leg_solver` creates a reusable compiled optimizer with
+runtime task context. `make_ik_solver` generates candidates from caller-supplied
+seeds and feasibility checks. Both live in `datafarm_pyroki.integration`; see
+[reusable planning utilities](docs/integration.md).
+
 The CLI in `examples/optimize_leg.py` loads a local URDF and saves a motion array.
 Use `uv run --extra planning python examples/optimize_leg.py --help` for arguments.
 The CLI checks self collision only; add scene obstacles through the Python API.
@@ -189,6 +255,10 @@ encoder's latent Gaussian. Load another prior or construct
 NVIDIA research/evaluation license, described below.
 
 ## Retime a trajectory segment after path optimization
+
+For fixed-duration motion, `sample_plan(steps)` joins legs, applies boundary easing
+and preserves gripper events/dwells. `interpolate_plan` and `validate_trajectory`
+provide interpolation and explicit motion-limit checks without a simulator.
 
 ```python
 from datafarm_pyroki import retime_trajectory_segment

@@ -15,7 +15,7 @@ import yourdfpy
 from _pick_place_scene import HOME
 
 from datafarm_pyroki import JointMap, load_encoder, load_joint_prior, select_ik_solution
-from datafarm_pyroki.integration import make_motion_cost
+from datafarm_pyroki.integration import make_ik_solver, make_leg_solver
 
 N_WAYPOINTS = 20
 SOURCE_DT = 0.10
@@ -57,37 +57,7 @@ class Planner:
     def _make_solvers(self, encoder_weight):
         robot, tcp, encoder, mapping = self.robot, self.tcp, self.encoder, self.mapping
 
-        @jaxls.Cost.factory(name="seed_regularization")
-        def seed_cost(vals, var, seed):
-            return 0.02 * (vals[var] - seed)
-
-        def one_ik(target, seed):
-            var = robot.joint_var_cls(0)
-            costs = [
-                pk.costs.pose_cost(robot, var, jaxlie.SE3(target), jnp.int32(tcp), 150.0, 50.0),
-                pk.costs.limit_constraint(robot, var),
-                seed_cost(var, seed),
-            ]
-            solution = (
-                jaxls.LeastSquaresProblem(costs, [var])
-                .analyze()
-                .solve(
-                    initial_vals=jaxls.VarValues.make((var.with_value(seed),)),
-                    termination=jaxls.TerminationConfig(max_iterations=80),
-                    verbose=False,
-                )
-            )
-            return solution[var]
-
-        self.ik = jax.jit(jax.vmap(one_ik, in_axes=(None, 0)))
-
-        @jaxls.Cost.factory(kind="constraint_eq_zero", name="endpoint")
-        def endpoint(vals, var, target):
-            return vals[var] - target
-
-        @jaxls.Cost.factory(name="acceleration")
-        def acceleration(vals, a, b, c):
-            return 0.15 * (vals[c] - 2 * vals[b] + vals[a]) / SOURCE_DT**2
+        self.ik = make_ik_solver(robot, "tcp")
 
         @jaxls.Cost.factory(kind="constraint_leq_zero", name="arm_table_clearance")
         def table(vals, var):
@@ -101,67 +71,40 @@ class Planner:
             # keeping the gripper/carried cube above the tabletop.
             return 0.10 - robot.forward_kinematics(vals[var])[tcp, 6]
 
-        def optimize(initial, targets, *, track_pose):
-            n = N_WAYPOINTS
-            variables = robot.joint_var_cls(jnp.arange(n))
-            points = tuple(robot.joint_var_cls(i) for i in range(n))
-            costs = [
-                pk.costs.limit_constraint(jax.tree.map(lambda x: x[None], robot), variables),
-                pk.costs.limit_velocity_constraint(
-                    jax.tree.map(lambda x: x[None], robot),
-                    robot.joint_var_cls(jnp.arange(1, n)),
-                    robot.joint_var_cls(jnp.arange(n - 1)),
-                    SOURCE_DT,
-                ),
-                pk.costs.smoothness_cost(
-                    robot.joint_var_cls(jnp.arange(1, n)),
-                    robot.joint_var_cls(jnp.arange(n - 1)),
-                    0.5,
-                ),
-                acceleration(
-                    robot.joint_var_cls(jnp.arange(n - 2)),
-                    robot.joint_var_cls(jnp.arange(1, n - 1)),
-                    robot.joint_var_cls(jnp.arange(2, n)),
-                ),
-                table(variables),
-                endpoint(points[0], initial[0]),
-                endpoint(points[-1], initial[-1]),
-            ]
-            if track_pose:
-                costs.append(
-                    pk.costs.pose_cost(
-                        jax.tree.map(lambda x: x[None], robot),
-                        variables,
-                        jaxlie.SE3(targets),
-                        jnp.full(n, tcp, dtype=jnp.int32),
-                        jnp.full(n, 250.0),
-                        jnp.full(n, 80.0),
+        def build_solver(track_pose):
+            def task_costs(points, targets):
+                variables = robot.joint_var_cls(jnp.arange(len(points)))
+                costs = [table(variables)]
+                if track_pose:
+                    costs.append(
+                        pk.costs.pose_cost(
+                            jax.tree.map(lambda x: x[None], robot),
+                            variables,
+                            jaxlie.SE3(targets),
+                            jnp.full(len(points), tcp, dtype=jnp.int32),
+                            jnp.full(len(points), 250.0),
+                            jnp.full(len(points), 80.0),
+                        )
                     )
-                )
-            else:
-                costs.append(free_space_clearance(variables))
-            if self.datafarm:
-                costs.append(
-                    make_motion_cost(
-                        encoder,
-                        points,
-                        source_dt=SOURCE_DT,
-                        weight=encoder_weight,
-                        joint_map=mapping,
-                    )
-                )
-            solution = (
-                jaxls.LeastSquaresProblem(costs, [variables])
-                .analyze()
-                .solve(
-                    initial_vals=jaxls.VarValues.make((variables.with_value(initial),)),
-                    termination=jaxls.TerminationConfig(max_iterations=65),
-                    verbose=False,
-                )
-            )
-            return solution[variables]
+                else:
+                    costs.append(free_space_clearance(variables))
+                return costs
 
-        self.optimize = jax.jit(optimize, static_argnames=("track_pose",))
+            return make_leg_solver(
+                robot,
+                encoder,
+                joint_map=mapping,
+                timesteps=N_WAYPOINTS,
+                source_dt=SOURCE_DT,
+                rest_endpoints=False,
+                encoder_weight=encoder_weight if self.datafarm else 0.0,
+                smoothness_weight=0.25,
+                acceleration_weight=0.0225,
+                extra_costs=task_costs,
+                max_iterations=65,
+            )
+
+        self.optimizers = {contact: build_solver(contact) for contact in (False, True)}
         self.fk = jax.jit(robot.forward_kinematics)
 
     def valid_configuration(self, q, allowed_cube=None):
@@ -206,12 +149,11 @@ class Planner:
         seeds = np.clip(HOME + self.seed_offsets, self.lower + 0.02, self.upper - 0.02)
         seeds[0] = current
         seeds[1] = HOME
-        candidates = np.asarray(self.ik(jnp.asarray(target), jnp.asarray(seeds, dtype=jnp.float32)))
-        poses = np.asarray(self.fk(jnp.asarray(candidates)))[:, self.tcp]
-        position_error = np.linalg.norm(poses[:, 4:] - xyz, axis=-1)
-        orientation_error = 2 * np.arccos(np.clip(np.abs(poses[:, :4] @ target[:4]), 0, 1))
-        feasible = (position_error < 0.0015) & (orientation_error < 0.015)
-        feasible &= np.array([self.valid_configuration(q, allowed_cube) for q in candidates])
+        result = self.ik(
+            target, seeds, feasibility=lambda q: self.valid_configuration(q, allowed_cube)
+        )
+        candidates, feasible = result.positions, result.feasible
+        position_error = result.position_errors
         if not feasible.any():
             raise RuntimeError(
                 f"No feasible IK for {xyz}; best position error {position_error.min():.4g}"
@@ -257,11 +199,10 @@ class Planner:
         )
         targets[:, 4:] = endpoints[0, 4:] + u[:, None] * (endpoints[1, 4:] - endpoints[0, 4:])
         q = np.asarray(
-            self.optimize(
-                jnp.asarray(initial, dtype=jnp.float32), jnp.asarray(targets), track_pose=track_pose
-            )
+            self.optimizers[track_pose](
+                start, goal, initial_waypoints=initial, context=jnp.asarray(targets)
+            ).positions
         ).copy()
-        q[0], q[-1] = start, goal
         poses = np.asarray(self.fk(jnp.asarray(q)))[:, self.tcp]
         max_error = float(np.linalg.norm(poses[:, 4:] - targets[:, 4:], axis=-1).max())
         dense_grid = np.linspace(0, len(q) - 1, 5 * (len(q) - 1) + 1)

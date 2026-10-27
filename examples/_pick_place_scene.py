@@ -285,3 +285,16 @@ def make_urdf(model, data, output):
     ET.SubElement(joint, "origin", xyz=" ".join(map(str, offset)), rpy=" ".join(map(str, rpy)))
     ET.indent(root)
     ET.ElementTree(root).write(output, encoding="unicode")
+
+
+def initial_state(model):
+    data = mujoco.MjData(model)
+    for i, q in enumerate(HOME, 1):
+        data.qpos[model.joint(f"joint{i}").qposadr] = q
+    data.ctrl[:7] = HOME
+    data.ctrl[7] = 0.0  # Robotiq: zero=open, 255=close
+    mujoco.mj_forward(model, data)
+    for _ in range(300):
+        mujoco.mj_step(model, data)
+    data.time = 0.0
+    return data

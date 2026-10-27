@@ -17,6 +17,7 @@ from .retiming import (
     _limits,
     retime_trajectory_segment,
 )
+from .trajectory import TrajectoryValidationError, interpolate_trajectory, validate_trajectory
 
 
 @dataclass(frozen=True)
@@ -125,6 +126,71 @@ def group_trajectory_segments(
     return tuple(out)
 
 
+@dataclass(frozen=True)
+class PlanTimeline:
+    """Sampled full-plan motion with timed gripper events and stationary dwells."""
+
+    positions: np.ndarray
+    times: np.ndarray
+    events: tuple[TimedGripperEvent, ...]
+
+
+def interpolate_plan(steps, *, output_dt=0.02):
+    """Join and interpolate motion between gripper events, keeping event identity."""
+    output = []
+    for step in group_trajectory_segments(steps):
+        if isinstance(step, GripperEvent):
+            output.append(step)
+        else:
+            sampled = interpolate_trajectory(step.positions, step.times, output_dt=output_dt)
+            output.append(MotionLeg(sampled.positions, sampled.dt, "; ".join(step.labels)))
+    return tuple(output)
+
+
+def sample_plan(
+    steps, *, output_dt=0.02, ease_boundaries=True, initial_position=None
+) -> PlanTimeline:
+    """Apply fixed-duration timing to a plan, inferring its start from its first leg.
+
+    An event-only plan requires initial_position. Gripper commands/dwell durations
+    are retained; zero-duration events do not introduce duplicate timestamps.
+    """
+    grouped = group_trajectory_segments(steps)
+    first = next((s for s in grouped if isinstance(s, TrajectorySegment)), None)
+    if not np.isfinite(output_dt) or output_dt <= 0:
+        raise ValueError("output_dt must be positive and finite")
+    if initial_position is None:
+        if first is None:
+            raise ValueError("An event-only plan requires initial_position")
+        initial_position = first.positions[0]
+    pose = np.asarray(initial_position, dtype=np.float64)
+    if pose.ndim != 1 or len(pose) == 0 or not np.isfinite(pose).all():
+        raise ValueError("initial_position must be a finite joint vector")
+    if first is not None and (
+        pose.shape != first.positions[0].shape
+        or not np.allclose(pose, first.positions[0], rtol=0, atol=1e-6)
+    ):
+        raise ValueError("initial_position must match the first motion leg")
+    positions, times, events = [pose.copy()], [0.0], []
+    elapsed = 0.0
+    for step in grouped:
+        if isinstance(step, GripperEvent):
+            events.append(TimedGripperEvent(elapsed, step))
+            if step.dwell_seconds > 0:
+                count = max(1, int(np.ceil(step.dwell_seconds / output_dt)))
+                times.extend(elapsed + np.linspace(0, step.dwell_seconds, count + 1)[1:])
+                positions.extend([positions[-1].copy() for _ in range(count)])
+                elapsed += step.dwell_seconds
+        else:
+            sampled = interpolate_trajectory(
+                step.positions, step.times, output_dt=output_dt, ease_boundaries=ease_boundaries
+            )
+            times.extend(elapsed + sampled.times[1:])
+            positions.extend(sampled.positions[1:])
+            elapsed += sampled.times[-1]
+    return PlanTimeline(np.asarray(positions), np.asarray(times), tuple(events))
+
+
 def _stitch_plan(steps, velocity_limits, acceleration_limits, *, output_dt):
     trajectory_segments = [step for step in steps if isinstance(step, RetimedTrajectorySegment)]
     if not trajectory_segments:
@@ -154,23 +220,16 @@ def _stitch_plan(steps, velocity_limits, acceleration_limits, *, output_dt):
     t = np.concatenate(t_chunks)
     if np.any(np.diff(t) <= 0):
         raise ValueError("Stitched timestamps must be strictly increasing")
-    # Recompute on the full signal, so a reversal/hold at a gripper boundary cannot
-    # evade acceleration checks merely because each trajectory segment was feasible in isolation.
-    velocity = np.gradient(q, t, axis=0)
-    velocity[0], velocity[-1] = 0.0, 0.0
-    acceleration = np.gradient(velocity, t, axis=0)
-    interval_speed = np.diff(q, axis=0) / np.diff(t)[:, None]
-    if (
-        not np.isfinite(velocity).all()
-        or not np.isfinite(acceleration).all()
-        or np.any(np.abs(interval_speed) > velocity_limits)
-        or np.any(np.abs(velocity) > velocity_limits)
-        or np.any(np.abs(acceleration) > acceleration_limits)
-    ):
+    # Include reversals/holds at gripper boundaries in the full-signal check.
+    try:
+        velocity, acceleration = validate_trajectory(
+            q, t, velocity_limits=velocity_limits, acceleration_limits=acceleration_limits
+        )
+    except TrajectoryValidationError as error:
         raise RetimingError(
             "Stitched motion exceeds limits, including at a trajectory segment/gripper junction; "
             "reduce boundary speed or change the duration/limit settings"
-        )
+        ) from error
     return RetimedPlan(tuple(steps), tuple(events), q, t, velocity, acceleration)
 
 

@@ -77,6 +77,7 @@ def test_constrained_pyroki_solve(encoder):
     )
     np.testing.assert_allclose(result.positions[:2], jnp.stack([start, start]), atol=2e-3)
     np.testing.assert_allclose(result.positions[-2:], jnp.stack([goal, goal]), atol=2e-3)
+    np.testing.assert_array_equal(np.asarray(result.positions)[-1], np.asarray(goal))
     assert np.isfinite(result.final_style_cost)
     assert result.max_constraint_violation <= 2e-3
     assert np.max(np.abs(np.diff(result.positions, axis=0) / 0.15)) <= 2.002
@@ -95,3 +96,83 @@ def test_explicit_joint_mapping():
         JointMap.from_names(
             ["a", "b"], ["joint1", "joint2"], aliases={"joint1": "a", "joint2": "a"}
         )
+
+
+def test_reusable_leg_solver_updates_task_context_without_retracing(encoder):
+    from datafarm_pyroki.integration import make_leg_solver
+
+    robot, _ = robot_fixture()
+    mapping = JointMap.from_names(robot.joints.actuated_names, encoder.spec.joint_names)
+    traces = []
+
+    @jaxls.Cost.factory(kind="constraint_eq_zero", name="middle_target")
+    def middle_target(vals, var, target):
+        return vals[var] - target
+
+    def task_costs(points, target):
+        traces.append(True)
+        return [middle_target(points[3], target)]
+
+    solver = make_leg_solver(
+        robot,
+        encoder,
+        joint_map=mapping,
+        source_dt=0.15,
+        timesteps=8,
+        rest_endpoints=False,
+        encoder_weight=0,
+        smoothness_weight=0.01,
+        acceleration_weight=0.0001,
+        extra_costs=task_costs,
+        max_iterations=40,
+    )
+    start = jnp.zeros(7)
+    for displacement in (0.01, 0.02):
+        target = jnp.full(7, displacement)
+        result = solver(start, start, context=target)
+        np.testing.assert_array_equal(np.asarray(result.positions)[[0, -1]], np.zeros((2, 7)))
+        np.testing.assert_allclose(result.positions[3], target, atol=2e-3)
+        assert result.max_constraint_violation <= 2e-3
+    assert len(traces) == 1
+
+    # The convenient single-leg API keeps its existing one-argument callback.
+    result = solve_leg(
+        robot,
+        encoder,
+        start,
+        start,
+        joint_map=mapping,
+        source_dt=0.15,
+        timesteps=8,
+        rest_endpoints=False,
+        encoder_weight=0,
+        extra_costs=lambda points: [middle_target(points[3], jnp.full(7, 0.01))],
+    )
+    np.testing.assert_allclose(result.positions[3], 0.01, atol=2e-3)
+
+
+def test_ik_generation_supports_other_robots_and_explicit_feasibility():
+    from datafarm_pyroki.integration import make_ik_solver
+
+    robot, _ = robot_fixture(3)
+    goal = jnp.array([0.1, -0.2, 0.1])
+    target = np.asarray(robot.forward_kinematics(goal))[-1]
+    seeds = np.stack([goal, goal * 0.9, -goal])
+    solver = make_ik_solver(robot, "link3")
+    candidates = solver(target, seeds)
+    assert candidates.positions.shape == seeds.shape
+    assert candidates.feasible[0]
+    assert candidates.position_errors[0] < 0.0015
+    assert candidates.orientation_errors[0] < 0.015
+    rejected = solver(target, seeds, feasibility=lambda q: False)
+    assert not rejected.feasible.any()
+    np.testing.assert_allclose(rejected.positions, candidates.positions)
+    unreachable = target.copy()
+    unreachable[4:] = [100, 100, 100]
+    assert not solver(unreachable, seeds).feasible.any()
+    with pytest.raises(ValueError, match="seeds"):
+        solver(target, np.zeros((2, 7)))
+    with pytest.raises(ValueError, match="quaternion"):
+        solver(np.zeros(7), seeds)
+    with pytest.raises(ValueError, match="Unknown"):
+        make_ik_solver(robot, "missing")
