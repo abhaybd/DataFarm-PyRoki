@@ -31,7 +31,7 @@ Add `make_motion_cost` to the same `jaxls.LeastSquaresProblem` that optimizes a
 leg's joint variables. The new residual depends on the entire leg and uses
 reverse-mode autodiff through the JAX encoder. Preserve the geometric/task
 constraints that defined that leg. The fixed clock matches the normal upstream
-path-optimization mode. Do not optimize a full gripper-to-gripper stroke as a
+path-optimization mode. Do not optimize a full gripper-to-gripper trajectory segment as a
 single geometry problem if reproducing DATAFARM's decomposition is the goal.
 
 The included `solve_leg` is a reference refinement solver. It takes previously
@@ -59,14 +59,14 @@ the model; its input width, latent dimension, rate and reference distribution
 are independent. The artifact must have been trained for the coordinates and
 embodiment you choose; names/metadata are an interface contract, not retargeting.
 
-## Stroke retiming
+## Trajectory segment retiming
 
 TiPToP calls `blend_cutamp_plan` after `run_cutamp` returns, before export or
 execution. Group consecutive motion legs between gripper actions. Preserve the
-gripper steps in sequence. Each group becomes one stroke whose geometric path is
+gripper steps in sequence. Each group becomes one trajectory segment whose geometric path is
 held fixed after optional smoothing; start/end positions remain pinned.
 
-The upstream `encoder_retime_group` optimizer changes the stroke duration and
+The upstream `encoder_retime_group` optimizer changes the trajectory segment duration and
 time allocated across 64 arc-length knots. It uses 16 batched starts and Adam,
 with a shared frozen encoder/reference Gaussian. Score motions on a real model-rate
 grid with a differentiable soft validity mask, not by holding sample count fixed
@@ -80,8 +80,8 @@ is the latent cluster mean; the code also has an optional sampled-target mode.
 Candidates are emitted at the controller step and rejected if velocity or
 acceleration caps fail. Event order and gripper actuation remain separate.
 
-The standalone JAX implementation is `retime_stroke`; `retime_plan` groups legs,
-retains events/dwells, retimes strokes and checks the full stitched signal. It
+The standalone JAX implementation is `retime_trajectory_segment`; `retime_plan` groups legs,
+retains events/dwells, retimes trajectory segments and checks the full stitched signal. It
 loads no TiPToP or cuRobo modules. It uses each encoder's sampling rate and joint
 mapping, with limits on all robot coordinates. The encoder is fixed during Adam;
 only profile knots and duration change.

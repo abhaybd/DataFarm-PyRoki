@@ -2,7 +2,12 @@
 
 from .embodiment import EncoderSpec, JointMap
 from .encoder import MotionEncoder, load_encoder
-from .retiming import RetimeConfig, RetimedStroke, RetimingError, retime_stroke
+from .retiming import (
+    RetimeConfig,
+    RetimedTrajectorySegment,
+    RetimingError,
+    retime_trajectory_segment,
+)
 from .selection import (
     IKRanking,
     IKSelection,
@@ -12,13 +17,13 @@ from .selection import (
     rank_ik_solutions,
     select_ik_solution,
 )
-from .strokes import (
+from .trajectory_segments import (
     GripperEvent,
     MotionLeg,
     RetimedPlan,
-    Stroke,
     TimedGripperEvent,
-    group_strokes,
+    TrajectorySegment,
+    group_trajectory_segments,
     retime_plan,
 )
 
@@ -28,9 +33,9 @@ __all__ = [
     "JointMap",
     "load_encoder",
     "RetimeConfig",
-    "RetimedStroke",
+    "RetimedTrajectorySegment",
     "RetimingError",
-    "retime_stroke",
+    "retime_trajectory_segment",
     "IKRanking",
     "IKSelection",
     "JointPositionPrior",
@@ -41,8 +46,8 @@ __all__ = [
     "GripperEvent",
     "MotionLeg",
     "RetimedPlan",
-    "Stroke",
+    "TrajectorySegment",
     "TimedGripperEvent",
-    "group_strokes",
+    "group_trajectory_segments",
     "retime_plan",
 ]

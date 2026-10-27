@@ -1,4 +1,4 @@
-"""Retime a saved motion leg/stroke NPZ; writes data only, never controls a robot."""
+"""Retime a saved trajectory segment NPZ; writes data only, never controls a robot."""
 
 import argparse
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 import jax
 import numpy as np
 
-from datafarm_pyroki import JointMap, RetimeConfig, load_encoder, retime_stroke
+from datafarm_pyroki import JointMap, RetimeConfig, load_encoder, retime_trajectory_segment
 
 
 def main():
@@ -43,7 +43,7 @@ def main():
             p.error("--model-joints must contain one robot name per model coordinate")
         aliases = dict(zip(encoder.spec.joint_names, args.model_joints, strict=True))
     mapping = JointMap.from_names(names, encoder.spec.joint_names, aliases=aliases)
-    result = retime_stroke(
+    result = retime_trajectory_segment(
         encoder,
         positions,
         joint_map=mapping,

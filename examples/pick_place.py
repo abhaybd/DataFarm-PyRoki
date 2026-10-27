@@ -3,7 +3,7 @@
 uv run --extra planning --extra simulation python examples/pick_place.py --compare
 Use --datafarm / --no-datafarm for a single run. All downloaded meshes, plans and
 videos default to the ignored work/ directory. No robot hardware is controlled.
-DATAFARM uses learned stroke retiming by default; --no-retime uses a fixed clock.
+DATAFARM uses learned trajectory segment retiming by default; --no-retime uses a fixed clock.
 """
 
 from __future__ import annotations
@@ -33,9 +33,15 @@ from _pick_place_scene import (
 from PIL import Image, ImageDraw, ImageFont
 from scipy.interpolate import CubicSpline
 
-from datafarm_pyroki import GripperEvent, MotionLeg, RetimeConfig, RetimedStroke, retime_plan
+from datafarm_pyroki import (
+    GripperEvent,
+    MotionLeg,
+    RetimeConfig,
+    RetimedTrajectorySegment,
+    retime_plan,
+)
 from datafarm_pyroki.assets import MODEL_ASSETS
-from datafarm_pyroki.strokes import group_strokes
+from datafarm_pyroki.trajectory_segments import group_trajectory_segments
 
 
 def initial_state(model):
@@ -51,14 +57,14 @@ def initial_state(model):
     return data
 
 
-def smooth_strokes(steps, output_dt=0.02):
+def smooth_trajectory_segments(steps, output_dt=0.02):
     """Interpolate through leg joins; request rest only at gripper/plan boundaries.
 
     Both modes use this C2 interpolation. This changes the geometric
     interpolation between waypoints, so execution/collision checks remain required.
     """
     result = []
-    for step in group_strokes(steps):
+    for step in group_trajectory_segments(steps):
         if isinstance(step, GripperEvent):
             result.append(step)
             continue
@@ -72,7 +78,7 @@ def smooth_strokes(steps, output_dt=0.02):
     return result
 
 
-def baseline_stroke_positions(positions, dt):
+def baseline_trajectory_segment_positions(positions, dt):
     """Fixed duration, uniform cruise, smooth ramps over the outer 10% of time."""
     t = np.arange(len(positions)) * dt
     u = t / t[-1]
@@ -101,7 +107,7 @@ def baseline_timeline(steps, *, ease_boundaries=True):
     """Fixed source timing through leg joins; rest only at gripper events and ends."""
     positions, times, events = [HOME.copy()], [0.0], []
     elapsed = 0.0
-    for step in smooth_strokes(steps):
+    for step in smooth_trajectory_segments(steps):
         if isinstance(step, GripperEvent):
             events.append({"time": elapsed, "command": step.command})
             count = max(1, int(np.ceil(step.dwell_seconds / 0.02)))
@@ -110,7 +116,7 @@ def baseline_timeline(steps, *, ease_boundaries=True):
             elapsed += step.dwell_seconds
         else:
             q = (
-                baseline_stroke_positions(step.positions, step.dt)
+                baseline_trajectory_segment_positions(step.positions, step.dt)
                 if ease_boundaries
                 else step.positions
             )
@@ -186,7 +192,7 @@ def make_timeline(planner, steps, args):
     if not planner.datafarm or not args.retime:
         q, times, events = baseline_timeline(steps)
         return q, times, events, [], 0.0
-    print("Retiming gripper-delimited strokes with the frozen encoder…", flush=True)
+    print("Retiming gripper-delimited trajectory segments with the frozen encoder…", flush=True)
     config = RetimeConfig(
         knots=16,
         starts=args.retime_starts,
@@ -196,7 +202,7 @@ def make_timeline(planner, steps, args):
     )
     plan = retime_plan(
         planner.encoder,
-        smooth_strokes(steps),
+        smooth_trajectory_segments(steps),
         joint_map=planner.mapping,
         output_dt=0.02,
         velocity_limits=np.full(7, 2.0),
@@ -204,7 +210,9 @@ def make_timeline(planner, steps, args):
         boundary_speed=0.0,
         config=config,
     )
-    strokes = [step for step in plan.steps if isinstance(step, RetimedStroke)]
+    trajectory_segments = [
+        step for step in plan.steps if isinstance(step, RetimedTrajectorySegment)
+    ]
     records = [
         {
             "duration": s.duration,
@@ -215,7 +223,7 @@ def make_timeline(planner, steps, args):
             "objective": s.objective,
             "settings": asdict(config),
         }
-        for s in strokes
+        for s in trajectory_segments
     ]
     events = [{"time": event.time, "command": event.event.command} for event in plan.events]
     return plan.positions, plan.times, events, records, time.monotonic() - before
@@ -244,7 +252,8 @@ def annotate(frame, *, enabled, retimed, clock, duration, phase, placed, width, 
         fill="white",
     )
     detail = (
-        "Posture NLL + motion cost" + (" + stroke retiming" if retimed else " · fixed stroke clock")
+        "Posture NLL + motion cost"
+        + (" + trajectory segment retiming" if retimed else " · fixed trajectory segment clock")
         if enabled
         else "Nearest feasible IK + PyRoki fixed-clock trajopt"
     )
@@ -511,11 +520,9 @@ def run(args, enabled, model, robot_path):
         with np.load(plan_path, allow_pickle=False) as z:
             q, times = z["positions"], z["times"]
         metadata = json.loads(metadata_path.read_text())
-        if "free_space_constraints" not in metadata:
-            raise ValueError(
-                "Saved plan predates free-space optimization; rerun without --reuse-plan"
-            )
-        if bool(metadata.get("retiming_enabled", bool(metadata["strokes"]))) != retimed:
+        if "free_space_constraints" not in metadata or "trajectory_segments" not in metadata:
+            raise ValueError("Saved plan uses an older metadata format; rerun without --reuse-plan")
+        if bool(metadata.get("retiming_enabled", bool(metadata["trajectory_segments"]))) != retimed:
             raise ValueError(
                 "Saved plan uses different retiming settings; rerun without --reuse-plan"
             )
@@ -528,7 +535,7 @@ def run(args, enabled, model, robot_path):
         steps = plan_task(planner)
         source_q, source_times, source_events = baseline_timeline(steps, ease_boundaries=False)
         np.savez_compressed(output / "source_plan.npz", positions=source_q, times=source_times)
-        q, times, events, strokes, retime_seconds = make_timeline(planner, steps, args)
+        q, times, events, trajectory_segments, retime_seconds = make_timeline(planner, steps, args)
         metadata = {
             "datafarm": enabled,
             "retiming_enabled": retimed,
@@ -559,7 +566,7 @@ def run(args, enabled, model, robot_path):
             "events": events,
             "ik": planner.ik_records,
             "legs": planner.leg_records,
-            "strokes": strokes,
+            "trajectory_segments": trajectory_segments,
         }
         np.savez_compressed(plan_path, positions=q, times=times)
         metadata_path.write_text(json.dumps(metadata, indent=2))
@@ -584,7 +591,7 @@ def run(args, enabled, model, robot_path):
     metrics["mean_leg_style_cost"] = float(
         np.mean([record["style_cost"] for record in metadata["legs"]])
     )
-    metrics["retimed_strokes"] = len(metadata["strokes"])
+    metrics["retimed_trajectory_segments"] = len(metadata["trajectory_segments"])
     (output / "metrics.json").write_text(json.dumps(metrics, indent=2))
     print(json.dumps(metrics, indent=2), flush=True)
     return metrics
@@ -606,7 +613,7 @@ def main():
         "--retime",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Enable learned stroke retiming with DATAFARM (default: enabled)",
+        help="Enable learned trajectory segment retiming with DATAFARM (default: enabled)",
     )
     p.add_argument("--retime-iterations", type=int, default=250)
     p.add_argument("--retime-starts", type=int, default=8)

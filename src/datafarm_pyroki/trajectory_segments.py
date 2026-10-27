@@ -10,7 +10,13 @@ import numpy as np
 
 from .embodiment import JointMap
 from .encoder import MotionEncoder
-from .retiming import RetimeConfig, RetimedStroke, RetimingError, _limits, retime_stroke
+from .retiming import (
+    RetimeConfig,
+    RetimedTrajectorySegment,
+    RetimingError,
+    _limits,
+    retime_trajectory_segment,
+)
 
 
 @dataclass(frozen=True)
@@ -32,7 +38,9 @@ class GripperEvent:
 
 
 @dataclass(frozen=True)
-class Stroke:
+class TrajectorySegment:
+    """Consecutive motion legs joined between gripper events for retiming."""
+
     positions: np.ndarray
     times: np.ndarray
     labels: tuple[str, ...]
@@ -50,23 +58,23 @@ class TimedGripperEvent:
 
 @dataclass(frozen=True)
 class RetimedPlan:
-    steps: tuple[RetimedStroke | GripperEvent, ...]
+    steps: tuple[RetimedTrajectorySegment | GripperEvent, ...]
     events: tuple[TimedGripperEvent, ...]
     positions: np.ndarray
-    times: np.ndarray  # absolute local plan times; each stroke may have a slightly different dt
+    times: np.ndarray  # absolute plan times; segments may have slightly different dt
     velocities: np.ndarray
     accelerations: np.ndarray
 
 
-def group_strokes(
+def group_trajectory_segments(
     steps: Sequence[MotionLeg | GripperEvent],
     *,
     position_tolerance: float = 1e-6,
-) -> tuple[Stroke | GripperEvent, ...]:
+) -> tuple[TrajectorySegment | GripperEvent, ...]:
     """Join consecutive legs while retaining event identity, ordering and source timing.
 
-    Every gripper event ends the current stroke. No action/arm name assumptions
-    are made. A whole-body model can therefore delimit strokes using any gripper.
+    Every gripper event ends the current trajectory segment. No action/arm name assumptions
+    are made. A whole-body model can therefore delimit trajectory segments using any gripper.
     Discontinuous leg endpoints are rejected, including across gripper events.
     """
     if not np.isfinite(position_tolerance) or position_tolerance < 0:
@@ -77,7 +85,9 @@ def group_strokes(
 
     def flush():
         if positions:
-            out.append(Stroke(np.concatenate(positions), np.concatenate(times), tuple(labels)))
+            out.append(
+                TrajectorySegment(np.concatenate(positions), np.concatenate(times), tuple(labels))
+            )
             positions.clear()
             times.clear()
             labels.clear()
@@ -116,12 +126,12 @@ def group_strokes(
 
 
 def _stitch_plan(steps, velocity_limits, acceleration_limits, *, output_dt):
-    strokes = [step for step in steps if isinstance(step, RetimedStroke)]
-    if not strokes:
-        raise ValueError("A retimed plan needs at least one stroke")
-    q_chunks = [strokes[0].positions[:1]]
+    trajectory_segments = [step for step in steps if isinstance(step, RetimedTrajectorySegment)]
+    if not trajectory_segments:
+        raise ValueError("A retimed plan needs at least one trajectory segment")
+    q_chunks = [trajectory_segments[0].positions[:1]]
     t_chunks = [np.array([0.0])]
-    pose = strokes[0].positions[0]
+    pose = trajectory_segments[0].positions[0]
     elapsed = 0.0
     events = []
     for step in steps:
@@ -135,7 +145,7 @@ def _stitch_plan(steps, velocity_limits, acceleration_limits, *, output_dt):
                 elapsed += step.dwell_seconds
         else:
             if not np.allclose(pose, step.positions[0], rtol=0, atol=1e-6):
-                raise ValueError("Retimed stroke endpoints are discontinuous")
+                raise ValueError("Retimed trajectory segment endpoints are discontinuous")
             q_chunks.append(step.positions[1:])
             t_chunks.append(elapsed + step.times[1:])
             elapsed += step.duration
@@ -145,7 +155,7 @@ def _stitch_plan(steps, velocity_limits, acceleration_limits, *, output_dt):
     if np.any(np.diff(t) <= 0):
         raise ValueError("Stitched timestamps must be strictly increasing")
     # Recompute on the full signal, so a reversal/hold at a gripper boundary cannot
-    # evade acceleration checks merely because each stroke was feasible in isolation.
+    # evade acceleration checks merely because each trajectory segment was feasible in isolation.
     velocity = np.gradient(q, t, axis=0)
     velocity[0], velocity[-1] = 0.0, 0.0
     acceleration = np.gradient(velocity, t, axis=0)
@@ -158,7 +168,7 @@ def _stitch_plan(steps, velocity_limits, acceleration_limits, *, output_dt):
         or np.any(np.abs(acceleration) > acceleration_limits)
     ):
         raise RetimingError(
-            "Stitched motion exceeds limits, including at a stroke/gripper junction; "
+            "Stitched motion exceeds limits, including at a trajectory segment/gripper junction; "
             "reduce boundary speed or change the duration/limit settings"
         )
     return RetimedPlan(tuple(steps), tuple(events), q, t, velocity, acceleration)
@@ -177,11 +187,11 @@ def retime_plan(
     key: jax.Array | None = None,
     trajectory_validator: Callable[[np.ndarray, np.ndarray], bool] | None = None,
 ) -> RetimedPlan:
-    """Retime each stroke, preserve gripper commands/dwells, and validate the stitched plan.
+    """Retime trajectory segments, preserve gripper events, and validate the stitched plan.
 
     Boundary speed is a caller-selected soft target at gripper-adjacent ends.
-    Only a stroke at a plan's absolute beginning/end requests exact rest there.
-    A provided PRNG key samples an independent target per stroke; default is the
+    Only a trajectory segment at a plan's absolute beginning/end requests exact rest there.
+    A provided PRNG key samples an independent target per trajectory segment; default is the
     reference mean. Callback timestamps are LOCAL for each candidate, then absolute
     for the final stitched validation. The function never executes any commands.
     """
@@ -189,8 +199,8 @@ def retime_plan(
         raise ValueError("boundary_speed must be nonnegative and finite")
     if not np.isfinite(output_dt) or output_dt <= 0:
         raise ValueError("output_dt must be positive and finite")
-    grouped = group_strokes(steps)
-    if not any(isinstance(s, Stroke) for s in grouped):
+    grouped = group_trajectory_segments(steps)
+    if not any(isinstance(s, TrajectorySegment) for s in grouped):
         raise ValueError("Plan needs at least one motion leg")
     vel_cap = _limits(velocity_limits, len(joint_map.robot_joint_names), "velocity_limits")
     acc_cap = _limits(acceleration_limits, len(joint_map.robot_joint_names), "acceleration_limits")
@@ -199,11 +209,11 @@ def retime_plan(
         if isinstance(step, GripperEvent):
             output.append(step)
             continue
-        stroke_key = None
+        trajectory_segment_key = None
         if key is not None:
-            key, stroke_key = jax.random.split(key)
+            key, trajectory_segment_key = jax.random.split(key)
         output.append(
-            retime_stroke(
+            retime_trajectory_segment(
                 encoder,
                 step.positions,
                 joint_map=joint_map,
@@ -215,7 +225,7 @@ def retime_plan(
                 lead_speed=0.0 if i == 0 else boundary_speed,
                 trail_speed=0.0 if i == len(grouped) - 1 else boundary_speed,
                 config=config,
-                key=stroke_key,
+                key=trajectory_segment_key,
                 trajectory_validator=trajectory_validator,
             )
         )

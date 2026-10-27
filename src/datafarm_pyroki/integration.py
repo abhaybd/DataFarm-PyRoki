@@ -90,7 +90,7 @@ def solve_leg(
     """Refine one motion leg with fixed joint endpoints and a frozen motion-style cost.
 
     This replaces the waypoint-optimization stage, not task planning, IK, gripper
-    scheduling, or stroke retiming. Supply the actual start and an already selected
+    scheduling, or trajectory segment retiming. Supply the actual start and an already selected
     goal (e.g. from your endpoint prior). The uniform waypoint clock stays fixed.
 
     Self collisions are constrained at waypoints; world collisions use PyRoki's

@@ -14,7 +14,7 @@ Run a single mode with `--datafarm` or `--no-datafarm`. `--compare` runs both an
 writes a synchronized, normal-speed split-screen video. The shorter run holds its
 last frame after finishing; neither run is sped up to match the other.
 Learned retiming is enabled by default for DATAFARM (`--retime`). Use `--no-retime`
-to give both modes the same fixed stroke clock and isolate posture selection and
+to give both modes the same fixed trajectory segment clock and isolate posture selection and
 geometric trajectory optimization. The baseline always uses the fixed clock.
 
 The default output folder is `work/pick-place-comparison/`:
@@ -43,7 +43,7 @@ The learned models use the package's pinned Hugging Face downloads and cache.
 | --- | --- | --- |
 | IK | Nearest feasible solution to the current configuration | Minimum posture-GMM NLL among feasible solutions |
 | Trajectory optimization | Fixed joint endpoints, smoothness, acceleration, joint/velocity limits and table clearance; TCP tracking only for contact legs | The same terms plus one frozen encoder residual spanning each whole leg |
-| Timing | Fixed source durations, continuous motion through leg joins; rest at gripper events and plan ends | Learned stroke retiming by default; fixed clock with `--no-retime` |
+| Timing | Fixed source durations, continuous motion through leg joins; rest at gripper events and plan ends | Learned trajectory segment retiming by default; fixed clock with `--no-retime` |
 | Gripper/physics | Identical opening/closing commands, dwell lengths and contact model | Identical opening/closing commands, dwell lengths and contact model |
 
 The baseline loads the released models only to report comparable NLL/style scores.
@@ -69,20 +69,20 @@ Intermediate leg endpoints are position constraints, with no duplicated rest
 samples or per-leg minimum-jerk clock. Both modes interpolate a common type of
 C2 cubic joint curve through the source waypoints, with zero endpoint velocity
 only at gripper events and the plan ends. The baseline preserves the original
-stroke duration (the sum of 1.9 s source legs) and samples this curve at 20 ms.
-Its fixed clock uses smooth speed ramps over the first/last 10% of each stroke,
+trajectory segment duration (the sum of 1.9 s source legs) and samples this curve at 20 ms.
+Its fixed clock uses smooth speed ramps over the first/last 10% of each trajectory segment,
 with uniform cruise between them. These ramps only occur at gripper/plan
 boundaries; intermediate legs do not receive individual easing or holds.
 Geometry between source
 waypoints changes slightly; the physics replay checks unintended contacts.
 
-With `--retime`, DataFarm mode retimes seven gripper-delimited strokes with 16 clock
+With `--retime`, DataFarm mode retimes seven gripper-delimited trajectory segments with 16 clock
 knots, eight starts and 250 Adam iterations. `--retime-starts` and
 `--retime-iterations` change these settings. Timing uses a fixed geometric path,
 zero boundary-speed targets for grasps/releases, and checks commanded velocities,
 accelerations and stitched junctions. The demo's retiming caps are 2 rad/s and
 20 rad/s² per arm coordinate, with duration bounds from 0.7× to 3× the original
-stroke, clipped by the retimer's overall duration range. These are simulation
+trajectory segment, clipped by the retimer's overall duration range. These are simulation
 settings. `--encoder-weight` changes the whole-leg learned-cost weight (default 0.3).
 The clock is a monotone C2 quintic with genuine easing at rest boundaries. Explicit
 penalties discourage adjacent clock-rate fluctuations (weight 0.1), large departures
@@ -90,7 +90,7 @@ from uniform arc speed (0.5), and excess duration (2 times duration/source durat
 Direct mean squared acceleration (0.1) and jerk (0.01) penalties also account for
 bends in the joint path; smooth clock rates alone cannot remove that roughness.
 These additions trade some learned style score for smoother, more efficient timing;
-they are configurable through `RetimeConfig` and recorded with each stroke.
+they are configurable through `RetimeConfig` and recorded with each segment.
 See [retiming](retiming.md) for the complete objective and geometry limitations.
 
 ## Actual manipulation and validation
@@ -104,7 +104,7 @@ steps and unintended robot contacts. It fails if fewer than three cubes finish
 on the disc or if unintended penetrating robot contacts are detected.
 
 A fresh run measures both planner-space and executed behavior: per-leg latent
-Mahalanobis costs, selected posture NLL, seven stroke timing scores, execution
+Mahalanobis costs, selected posture NLL, seven trajectory segment timing scores, execution
 duration, joint tracking error, joint motion and final XY placement errors.
 Commanded acceleration and jerk RMS are also recorded to inspect timing smoothness.
 The style score is the objective being optimized; its reduction alone does not
@@ -122,6 +122,8 @@ uv run --extra planning --extra simulation python examples/pick_place.py --compa
 ```
 
 When reusing plans, keep `--retime`/`--no-retime` consistent with the saved run.
+Saved plan metadata uses `trajectory_segments`; regenerate older plans before
+using `--reuse-plan`.
 
 `--output`, `--asset-cache`, `--fps`, `--width`, and `--height` configure local
 artifacts and rendering. On a headless Linux machine, use MuJoCo's supported EGL

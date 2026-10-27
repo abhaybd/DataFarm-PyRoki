@@ -9,13 +9,13 @@ from datafarm_pyroki import (
     JointMap,
     MotionLeg,
     RetimeConfig,
-    RetimedStroke,
+    RetimedTrajectorySegment,
     RetimingError,
-    Stroke,
-    group_strokes,
+    TrajectorySegment,
+    group_trajectory_segments,
     retime_plan,
 )
-from datafarm_pyroki.strokes import _stitch_plan
+from datafarm_pyroki.trajectory_segments import _stitch_plan
 
 
 def plan_input():
@@ -36,16 +36,16 @@ def plan_input():
 
 def test_grouping_preserves_events_and_nonuniform_source_clock():
     q, steps = plan_input()
-    grouped = group_strokes(steps)
+    grouped = group_trajectory_segments(steps)
     assert len(grouped) == 5
     assert grouped[0] is steps[0] and grouped[2] is steps[3] and grouped[4] is steps[5]
-    assert isinstance(grouped[1], Stroke)
+    assert isinstance(grouped[1], TrajectorySegment)
     np.testing.assert_array_equal(grouped[1].positions, q)
     np.testing.assert_allclose(np.diff(grouped[1].times), [0.1] * 8 + [0.15] * 7)
     assert grouped[1].labels == ("retract", "transit")
-    assert group_strokes([steps[0]]) == (steps[0],)
+    assert group_trajectory_segments([steps[0]]) == (steps[0],)
     with pytest.raises(ValueError, match="Discontinuous"):
-        group_strokes([MotionLeg(q, 0.1), steps[3], MotionLeg(q + 1.0, 0.1)])
+        group_trajectory_segments([MotionLeg(q, 0.1), steps[3], MotionLeg(q + 1.0, 0.1)])
 
 
 def test_actual_plan_retiming_preserves_commands_holds_and_limits(encoder):
@@ -79,12 +79,12 @@ def test_actual_plan_retiming_preserves_commands_holds_and_limits(encoder):
         assert np.max(np.ptp(plan.positions[hold], axis=0)) < 1e-12
 
 
-def test_stitched_reversal_is_checked_even_if_individual_strokes_pass():
-    # Each standalone stroke has constant velocity and zero acceleration. Their
+def test_stitched_reversal_is_checked_even_if_individual_trajectory_segments_pass():
+    # Each standalone trajectory segment has constant velocity and zero acceleration. Their
     # reversal must still be rejected by the full-plan check.
     times = np.array([0.0, 0.05, 0.1])
     q = np.array([[0.0], [0.05], [0.1]])
-    forward = RetimedStroke(
+    forward = RetimedTrajectorySegment(
         q,
         np.ones_like(q),
         np.zeros_like(q),

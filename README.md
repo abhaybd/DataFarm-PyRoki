@@ -6,7 +6,7 @@
 
 A JAX port of DATAFARM's frozen motion encoder with pretrained weight loading, plus a
 whole-motion-leg residual and constrained trajectory solver for PyRoki, followed
-by JAX stroke retiming and joint-density-based IK selection.
+by JAX trajectory segment retiming and joint-density-based IK selection.
 
 ## Setup
 
@@ -188,12 +188,12 @@ encoder's latent Gaussian. Load another prior or construct
 [docs/selection.md](docs/selection.md). The reference GMM retains its upstream
 NVIDIA research/evaluation license, described below.
 
-## Retime a stroke after path optimization
+## Retime a trajectory segment after path optimization
 
 ```python
-from datafarm_pyroki import retime_stroke
+from datafarm_pyroki import retime_trajectory_segment
 
-stroke = retime_stroke(
+segment = retime_trajectory_segment(
     encoder,
     joined_waypoints,
     joint_map=joint_map,
@@ -204,7 +204,7 @@ stroke = retime_stroke(
     lead_speed=0.0,
     trail_speed=0.07,
 )
-# stroke.positions, velocities, accelerations, times, dt are ready for inspection.
+# segment.positions, velocities, accelerations, times, dt are ready for inspection.
 ```
 
 This optimizes duration and speed-profile shape on a fixed geometric curve,
@@ -216,7 +216,7 @@ jerk penalties regularize the learned style objective. See [retiming settings](d
 for weights, units and geometry requirements.
 Returned `dt` is the actual uniform timestep, approximately `output_dt`.
 
-For a plan with several legs and gripper actions, let the helper form the strokes:
+For a plan with several legs and gripper actions, let the helper form the trajectory segments:
 
 ```python
 from datafarm_pyroki import MotionLeg, GripperEvent, retime_plan
@@ -255,14 +255,14 @@ The closest stage structure is:
 
 1. Select feasible IK endpoints with a reference configuration prior.
 2. Optimize each planner leg with the motion latent cost added to the base objective.
-3. Join legs between gripper events and retime each complete stroke, using the same
+3. Join legs between gripper events and retime each complete trajectory segment, using the same
    encoder plus a configured boundary-speed term.
 
 This repository implements the learned encoder, GMM-based endpoint ranking,
-PyRoki leg refinement and standalone stroke retiming. Task sequencing and IK
+PyRoki leg refinement and standalone trajectory segment retiming. Task sequencing and IK
 candidate generation stay with the caller. See [docs/integration.md](docs/integration.md)
 for the upstream hooks. `solve_leg` keeps its clock fixed; its endpoint-rest
-option applies before stroke retiming.
+option applies before trajectory segment retiming.
 
 ## MuJoCo three-cube comparison
 
@@ -273,8 +273,8 @@ uv run --extra planning --extra simulation python examples/pick_place.py --compa
 This simulates a DROID-style Franka/Robotiq picking three cubes onto a flat disc
 and renders normal-speed videos with DataFarm off/on. Use `--datafarm` or
 `--no-datafarm` for individual runs. The flag switches posture-prior IK selection
-and whole-leg encoder costs. DATAFARM also uses learned stroke retiming by default;
-use `--no-retime` to compare both modes on the fixed stroke clock. Manipulation
+and whole-leg encoder costs. DATAFARM also uses learned trajectory segment retiming by default;
+use `--no-retime` to compare both modes on the fixed trajectory segment clock. Manipulation
 uses MuJoCo contact physics; output includes grasp/placement checks, trajectories and comparison
 metrics. See [docs/pick_place.md](docs/pick_place.md) for setup, controls and scope.
 
@@ -318,7 +318,7 @@ variances, auxiliary outputs, padded masks, preprocessing, costs and waypoint
 gradients. They exercise an actual constrained PyRoki solve, a single whole-leg
 jaxls factor, joint reordering, and an alternate model dimension/rate. Timing
 objective and profile/duration gradients are checked against PyTorch; emission,
-stroke grouping, gripper holds, junction limits and GMM NLL selection are tested.
+trajectory segment grouping, gripper holds, junction limits and GMM NLL selection are tested.
 Synthetic alternate-model tests verify plumbing, not trained behavior on another embodiment.
 
 The first solve compiles the network and its trajectory Jacobian. A whole-leg

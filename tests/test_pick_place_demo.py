@@ -40,7 +40,7 @@ def test_baseline_clock_preserves_gripper_events_and_holds(demo):
     np.testing.assert_allclose(q[hold], np.broadcast_to(goal, q[hold].shape))
 
 
-def test_baseline_flows_through_leg_joins_and_eases_only_at_stroke_ends(demo):
+def test_baseline_flows_through_leg_joins_and_eases_only_at_trajectory_segment_ends(demo):
     from datafarm_pyroki import MotionLeg
 
     home = demo.HOME.copy()
@@ -57,6 +57,21 @@ def test_baseline_flows_through_leg_joins_and_eases_only_at_stroke_ends(demo):
     assert min(velocity[middle - 1 : middle + 1]) > 0.15
     assert velocity[0] < 0.1 and velocity[-1] < 0.1
     np.testing.assert_allclose(q[middle], home + delta)
+
+
+def test_reuse_rejects_outdated_metadata_with_regeneration_hint(demo, tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    output = tmp_path / "baseline"
+    output.mkdir()
+    np.savez_compressed(
+        output / "plan.npz", positions=np.stack([demo.HOME, demo.HOME]), times=[0.0, 1.0]
+    )
+    (output / "planning.json").write_text(json.dumps({"free_space_constraints": "table clearance"}))
+    args = SimpleNamespace(output=tmp_path, retime=False, reuse_plan=True)
+    with pytest.raises(ValueError, match="rerun without --reuse-plan"):
+        demo.run(args, False, None, tmp_path / "robot.urdf")
 
 
 def test_mujoco_pyroki_kinematics_and_free_cubes(demo, tmp_path):

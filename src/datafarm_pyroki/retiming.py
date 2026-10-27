@@ -1,4 +1,4 @@
-"""Standalone JAX stroke timing, following TiPToP's encoder-based retiming design.
+"""Standalone JAX trajectory segment timing, following TiPToP's encoder-based retiming design.
 
 TiPToP algorithm attribution: Copyright (c) 2025 TiPToP Contributors (MIT).
 See licenses/TIPTOP.txt. This implementation has no TiPToP/cuRobo/PyTorch dependency.
@@ -86,7 +86,7 @@ class RetimingError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class RetimedStroke:
+class RetimedTrajectorySegment:
     positions: np.ndarray  # [T, robot_dof], in ROBOT order
     velocities: np.ndarray
     accelerations: np.ndarray
@@ -176,7 +176,7 @@ def motion_regularization(
     """Physical acceleration/jerk costs in all robot coordinates, per candidate.
 
     This fixed physical grid is independent of the trained encoder rate. A
-    prefix mask excludes difference stencils extending beyond the stroke.
+    prefix mask excludes difference stencils extending beyond the trajectory segment.
     """
     rate = config.regularization_rate_hz
     frames = jnp.arange(n_frames, dtype=path.dtype)
@@ -427,7 +427,7 @@ def _boundary_cost(positions, times, mapping, lead_speed, trail_speed, rate):
     return float(result)
 
 
-def retime_stroke(
+def retime_trajectory_segment(
     encoder: MotionEncoder,
     positions,
     *,
@@ -444,8 +444,8 @@ def retime_stroke(
     target_latent=None,
     key: jax.Array | None = None,
     trajectory_validator: Callable[[np.ndarray, np.ndarray], bool] | None = None,
-) -> RetimedStroke:
-    """Optimize only a stroke's clock, then select a limit-feasible emitted candidate.
+) -> RetimedTrajectorySegment:
+    """Optimize only a trajectory segment's clock, then select a limit-feasible emitted candidate.
 
     Default target is the reference mean. `target_latent` supplies a fixed target;
     alternatively `key` samples once from the reference Gaussian, shared by all
@@ -595,7 +595,7 @@ def retime_stroke(
             )
     if best is None:
         raise RetimingError(
-            "No emitted stroke satisfies motion limits and trajectory validation "
+            "No emitted trajectory segment satisfies motion limits and trajectory validation "
             f"within duration bounds [{lower:.3g}, {upper:.3g}] seconds"
         )
     (
@@ -611,7 +611,7 @@ def retime_stroke(
         motion_cost,
     ) = best
     original_style = _score_emitted(encoder, q, source_times, joint_map, target)
-    return RetimedStroke(
+    return RetimedTrajectorySegment(
         emitted,
         velocities,
         accelerations,

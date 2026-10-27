@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 
-from datafarm_pyroki import JointMap, RetimeConfig, RetimingError, retime_stroke
+from datafarm_pyroki import JointMap, RetimeConfig, RetimingError, retime_trajectory_segment
 from datafarm_pyroki.retiming import (
     clock_knots,
     motion_regularization,
@@ -18,7 +18,7 @@ from datafarm_pyroki.retiming import (
 
 
 @pytest.fixture
-def stroke_input(encoder):
+def trajectory_segment_input(encoder):
     t = np.linspace(0.0, 1.0, 16)[:, None]
     q = np.array([0.0, -0.5, 0.0, -2.0, 0.0, 1.5, 0.8]) + 0.07 * np.sin(t * np.arange(1, 8)[None])
     mapping = JointMap.from_names(encoder.spec.joint_names, encoder.spec.joint_names)
@@ -222,9 +222,9 @@ def test_timing_cost_and_duration_profile_gradients_match_torch(encoder, torch_e
         assert np.linalg.norm(grad_theta) > 0 and np.linalg.norm(grad_span) > 0
 
 
-def test_actual_retimer_emits_feasible_motion(encoder, stroke_input, short_config):
-    q, mapping = stroke_input
-    result = retime_stroke(
+def test_actual_retimer_emits_feasible_motion(encoder, trajectory_segment_input, short_config):
+    q, mapping = trajectory_segment_input
+    result = retime_trajectory_segment(
         encoder,
         q,
         joint_map=mapping,
@@ -255,8 +255,10 @@ def test_actual_retimer_emits_feasible_motion(encoder, stroke_input, short_confi
     assert np.isclose(result.times[-1], result.duration)
 
 
-def test_retimer_rejects_caps_and_failed_validation(encoder, stroke_input, short_config):
-    q, mapping = stroke_input
+def test_retimer_rejects_caps_and_failed_validation(
+    encoder, trajectory_segment_input, short_config
+):
+    q, mapping = trajectory_segment_input
     kwargs = dict(
         joint_map=mapping,
         original_duration=2.0,
@@ -264,12 +266,12 @@ def test_retimer_rejects_caps_and_failed_validation(encoder, stroke_input, short
         config=short_config,
         duration_bounds=(1.0, 3.0),
     )
-    with pytest.raises(RetimingError, match="No emitted stroke"):
-        retime_stroke(
+    with pytest.raises(RetimingError, match="No emitted trajectory segment"):
+        retime_trajectory_segment(
             encoder, q, velocity_limits=np.full(7, 1e-8), acceleration_limits=np.ones(7), **kwargs
         )
-    with pytest.raises(RetimingError, match="No emitted stroke"):
-        retime_stroke(
+    with pytest.raises(RetimingError, match="No emitted trajectory segment"):
+        retime_trajectory_segment(
             encoder,
             q,
             velocity_limits=np.full(7, 3.0),
@@ -278,13 +280,13 @@ def test_retimer_rejects_caps_and_failed_validation(encoder, stroke_input, short
             **kwargs,
         )
     with pytest.raises(ValueError, match="positive finite"):
-        retime_stroke(
+        retime_trajectory_segment(
             encoder, q, velocity_limits=np.zeros(7), acceleration_limits=np.full(7, 30.0), **kwargs
         )
 
 
-def test_explicit_target_and_random_key_are_reproducible(encoder, stroke_input):
-    q, mapping = stroke_input
+def test_explicit_target_and_random_key_are_reproducible(encoder, trajectory_segment_input):
+    q, mapping = trajectory_segment_input
     kwargs = dict(
         joint_map=mapping,
         original_duration=2.0,
@@ -295,8 +297,8 @@ def test_explicit_target_and_random_key_are_reproducible(encoder, stroke_input):
         duration_bounds=(2.0, 2.0),
     )
     key = jax.random.key(3)
-    a = retime_stroke(encoder, q, key=key, **kwargs)
-    b = retime_stroke(encoder, q, key=key, **kwargs)
+    a = retime_trajectory_segment(encoder, q, key=key, **kwargs)
+    b = retime_trajectory_segment(encoder, q, key=key, **kwargs)
     np.testing.assert_array_equal(a.target_latent, b.target_latent)
     np.testing.assert_array_equal(a.positions, b.positions)
     expected = encoder.latent_mean + jnp.linalg.solve(
@@ -304,7 +306,7 @@ def test_explicit_target_and_random_key_are_reproducible(encoder, stroke_input):
     )
     np.testing.assert_allclose(a.target_latent, expected)
     with pytest.raises(ValueError, match="not both"):
-        retime_stroke(encoder, q, key=key, target_latent=encoder.latent_mean, **kwargs)
+        retime_trajectory_segment(encoder, q, key=key, target_latent=encoder.latent_mean, **kwargs)
 
 
 def test_retimer_supports_other_joint_counts_and_checks_every_robot_joint(encoder):
@@ -342,10 +344,10 @@ def test_retimer_supports_other_joint_counts_and_checks_every_robot_joint(encode
         config=RetimeConfig(starts=1, iterations=2, knots=8),
         duration_bounds=(1.0, 3.0),
     )
-    result = retime_stroke(custom, robot_q, velocity_limits=np.full(12, 10.0), **kwargs)
+    result = retime_trajectory_segment(custom, robot_q, velocity_limits=np.full(12, 10.0), **kwargs)
     assert result.positions.shape[1] == 12
     np.testing.assert_array_equal(result.positions[[0, -1]], robot_q[[0, -1]])
     caps = np.full(12, 10.0)
     caps[0] = 1e-10  # coordinate outside the original seven still must obey its cap
     with pytest.raises(RetimingError):
-        retime_stroke(custom, robot_q, velocity_limits=caps, **kwargs)
+        retime_trajectory_segment(custom, robot_q, velocity_limits=caps, **kwargs)

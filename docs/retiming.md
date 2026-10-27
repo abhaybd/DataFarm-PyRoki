@@ -1,8 +1,9 @@
-# Stroke retiming
+# Trajectory segment retiming
 
-`retime_stroke` is a standalone JAX implementation of DATAFARM/TiPToP's timing
-stage. It follows the leg-wise PyRoki geometry optimization and does not modify
-PyRoki's optimization variables or train the encoder.
+`retime_trajectory_segment` is a standalone JAX implementation of DATAFARM/TiPToP's
+timing stage. It follows the leg-wise PyRoki geometry optimization and does not
+modify PyRoki's optimization variables or train the encoder. Here, a trajectory
+segment groups consecutive motion legs between gripper events or plan boundaries.
 
 ## Optimized quantities
 
@@ -53,8 +54,8 @@ Boundary targets are caller/configuration values, not learned gripper inputs.
 
 The default latent target is the reference mean. An explicit `target_latent` or
 JAX PRNG `key` can select a different target. A key draws one reference-Gaussian
-target per stroke, shared by all starts and candidate ranking; there is no global
-random state. `retime_plan` splits a supplied key across its strokes.
+target per trajectory segment, shared by all starts and candidate ranking; there is no global
+random state. `retime_plan` splits a supplied key across its trajectory segments.
 
 ## Geometry and emission
 
@@ -72,7 +73,7 @@ count. Coincident consecutive points are removed for arc-length parameterization
 With explicit positive smoothing, SciPy fits a smoothed curve first; endpoints
 are pinned and the result requires renewed geometric feasibility validation.
 
-The optimized curve is sampled at approximately `output_dt`. The returned stroke
+The optimized curve is sampled at approximately `output_dt`. The returned trajectory segment
 has uniform timestamps, actual `dt = duration/(samples-1)`, exact original endpoint
 positions, velocity and acceleration arrays, chosen target and diagnostic costs.
 `source_times` preserves a nonuniform original clock for baseline scoring; if
@@ -93,7 +94,7 @@ execute a robot. Source and output units must match your model and robot limits.
 
 ## Gripper-delimited plans
 
-`group_strokes` merges consecutive `MotionLeg` steps and leaves every
+`group_trajectory_segments` merges consecutive `MotionLeg` steps and leaves every
 `GripperEvent` object unchanged. It preserves each leg's dt in the merged source
 clock, rejects discontinuous endpoints (also across gripper actions), and never
 silently assumes the first seven columns are a robot's arm.
@@ -108,9 +109,9 @@ The returned full motion includes dwell samples. Velocities/accelerations are
 recomputed on its possibly nonuniform timestamps and validated across joins,
 including gripper reversals and transitions into/out of holds. If a stitched
 junction violates limits, the whole plan raises instead of returning independently
-feasible but jointly invalid strokes. Adjust boundary targets, source geometry or
+feasible but jointly invalid trajectory segments. Adjust boundary targets, source geometry or
 duration/limit settings and retry. The optional validator sees both local candidate
-strokes and the final absolute local plan timeline.
+trajectory segments and the final absolute local plan timeline.
 
 ## Deliberate adaptations from the pinned upstream code
 
