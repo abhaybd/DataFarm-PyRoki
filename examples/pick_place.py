@@ -3,6 +3,7 @@
 uv run --extra planning --extra simulation python examples/pick_place.py --compare
 Use --datafarm / --no-datafarm for a single run. All downloaded meshes, plans and
 videos default to the ignored work/ directory. No robot hardware is controlled.
+DATAFARM uses learned stroke retiming by default; --no-retime uses a fixed clock.
 """
 
 from __future__ import annotations
@@ -156,7 +157,9 @@ def plan_task(planner):
         for stage, (xyz, name) in enumerate(goals):
             goal = planner.endpoint(xyz, current, allowed_cube=cube)
             label = f"cube {cube + 1}: {name}"
-            path = planner.leg(current, goal, label, allowed_cube=cube)
+            path = planner.leg(
+                current, goal, label, allowed_cube=cube, track_pose=stage in (1, 2, 4, 5)
+            )
             steps.append(MotionLeg(path, SOURCE_DT, label))
             current = goal
             if stage == 1:
@@ -180,7 +183,7 @@ def plan_task(planner):
 
 def make_timeline(planner, steps, args):
     before = time.monotonic()
-    if not planner.datafarm:
+    if not planner.datafarm or not args.retime:
         q, times, events = baseline_timeline(steps)
         return q, times, events, [], 0.0
     print("Retiming gripper-delimited strokes with the frozen encoder…", flush=True)
@@ -228,7 +231,7 @@ def _font(size):
     return ImageFont.load_default(size=size)
 
 
-def annotate(frame, *, enabled, clock, duration, phase, placed, width, height):
+def annotate(frame, *, enabled, retimed, clock, duration, phase, placed, width, height):
     image = Image.fromarray(frame)
     draw = ImageDraw.Draw(image, "RGBA")
     draw.rectangle((0, 0, width, 78), fill=(10, 17, 29, 235))
@@ -241,7 +244,7 @@ def annotate(frame, *, enabled, clock, duration, phase, placed, width, height):
         fill="white",
     )
     detail = (
-        "Posture NLL + motion cost + stroke retiming"
+        "Posture NLL + motion cost" + (" + stroke retiming" if retimed else " · fixed stroke clock")
         if enabled
         else "Nearest feasible IK + PyRoki fixed-clock trajopt"
     )
@@ -319,7 +322,18 @@ class VideoWriter:
 
 
 def simulate(
-    model, q, times, events, *, enabled, output, fps=30, width=960, height=720, render=True
+    model,
+    q,
+    times,
+    events,
+    *,
+    enabled,
+    output,
+    retimed=False,
+    fps=30,
+    width=960,
+    height=720,
+    render=True,
 ):
     data = initial_state(model)
     ids = [model.body(f"cube{i}").id for i in range(3)]
@@ -410,6 +424,7 @@ def simulate(
                 frame = annotate(
                     renderer.render(),
                     enabled=enabled,
+                    retimed=retimed,
                     clock=t,
                     duration=duration,
                     phase=phase,
@@ -427,6 +442,7 @@ def simulate(
                 annotate(
                     renderer.render(),
                     enabled=enabled,
+                    retimed=retimed,
                     clock=duration,
                     duration=duration,
                     phase="complete",
@@ -485,6 +501,7 @@ def simulate(
 
 
 def run(args, enabled, model, robot_path):
+    retimed = enabled and args.retime
     name = "datafarm" if enabled else "baseline"
     output = args.output / name
     output.mkdir(parents=True, exist_ok=True)
@@ -494,6 +511,14 @@ def run(args, enabled, model, robot_path):
         with np.load(plan_path, allow_pickle=False) as z:
             q, times = z["positions"], z["times"]
         metadata = json.loads(metadata_path.read_text())
+        if "free_space_constraints" not in metadata:
+            raise ValueError(
+                "Saved plan predates free-space optimization; rerun without --reuse-plan"
+            )
+        if bool(metadata.get("retiming_enabled", bool(metadata["strokes"]))) != retimed:
+            raise ValueError(
+                "Saved plan uses different retiming settings; rerun without --reuse-plan"
+            )
         events = metadata["events"]
     else:
         planner = Planner(
@@ -506,14 +531,16 @@ def run(args, enabled, model, robot_path):
         q, times, events, strokes, retime_seconds = make_timeline(planner, steps, args)
         metadata = {
             "datafarm": enabled,
+            "retiming_enabled": retimed,
             "seed": args.seed,
             "encoder_weight": args.encoder_weight if enabled else 0.0,
             "planning_wall_seconds": time.monotonic() - before,
             "retiming_wall_seconds": retime_seconds,
             "source_dt": SOURCE_DT,
+            "free_space_constraints": "joint endpoints, joint/velocity limits and table clearance",
             "source_events": source_events,
             "baseline_clock": {"boundary_ramp_fraction": 0.1, "learned_timing": False}
-            if not enabled
+            if not retimed
             else None,
             "retiming_settings": {
                 "clock_knots": 16,
@@ -522,7 +549,7 @@ def run(args, enabled, model, robot_path):
                 "velocity_cap_rad_s": 2.0,
                 "acceleration_cap_rad_s2": 20.0,
             }
-            if enabled
+            if retimed
             else None,
             "mujoco_version": mujoco.__version__,
             "model_revisions": {
@@ -544,6 +571,7 @@ def run(args, enabled, model, robot_path):
         times,
         events,
         enabled=enabled,
+        retimed=retimed,
         output=output,
         fps=args.fps,
         width=args.width,
@@ -574,6 +602,12 @@ def main():
     p.add_argument("--asset-cache", type=Path, default=Path("work/menagerie-demo"))
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--encoder-weight", type=float, default=0.3)
+    p.add_argument(
+        "--retime",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable learned stroke retiming with DATAFARM (default: enabled)",
+    )
     p.add_argument("--retime-iterations", type=int, default=250)
     p.add_argument("--retime-starts", type=int, default=8)
     p.add_argument(

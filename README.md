@@ -274,9 +274,10 @@ uv run --extra planning --extra simulation python examples/pick_place.py --compa
 
 This simulates a DROID-style Franka/Robotiq picking three cubes onto a flat disc
 and renders normal-speed videos with DataFarm off/on. Use `--datafarm` or
-`--no-datafarm` for individual runs. The flag switches posture-prior IK selection,
-whole-leg encoder costs and stroke retiming. Manipulation uses MuJoCo contact
-physics; output includes grasp/placement checks, trajectories and comparison
+`--no-datafarm` for individual runs. The flag switches posture-prior IK selection
+and whole-leg encoder costs. DATAFARM also uses learned stroke retiming by default;
+use `--no-retime` to compare both modes on the fixed stroke clock. Manipulation
+uses MuJoCo contact physics; output includes grasp/placement checks, trajectories and comparison
 metrics. See [docs/pick_place.md](docs/pick_place.md) for setup, controls and scope.
 
 ## Checkpoint provenance and reproduction

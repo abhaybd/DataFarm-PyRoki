@@ -95,19 +95,17 @@ class Planner:
             indices = jnp.asarray([robot.links.names.index(f"link{i}") for i in range(2, 8)])
             return 0.075 - poses[indices, 6]
 
-        def optimize(initial, targets):
+        @jaxls.Cost.factory(kind="constraint_leq_zero", name="free_space_table_clearance")
+        def free_space_clearance(vals, var):
+            # An inequality leaves the transit shape and orientation free while
+            # keeping the gripper/carried cube above the tabletop.
+            return 0.10 - robot.forward_kinematics(vals[var])[tcp, 6]
+
+        def optimize(initial, targets, *, track_pose):
             n = N_WAYPOINTS
             variables = robot.joint_var_cls(jnp.arange(n))
             points = tuple(robot.joint_var_cls(i) for i in range(n))
             costs = [
-                pk.costs.pose_cost(
-                    jax.tree.map(lambda x: x[None], robot),
-                    variables,
-                    jaxlie.SE3(targets),
-                    jnp.full(n, tcp, dtype=jnp.int32),
-                    jnp.full(n, 250.0),
-                    jnp.full(n, 80.0),
-                ),
                 pk.costs.limit_constraint(jax.tree.map(lambda x: x[None], robot), variables),
                 pk.costs.limit_velocity_constraint(
                     jax.tree.map(lambda x: x[None], robot),
@@ -129,6 +127,19 @@ class Planner:
                 endpoint(points[0], initial[0]),
                 endpoint(points[-1], initial[-1]),
             ]
+            if track_pose:
+                costs.append(
+                    pk.costs.pose_cost(
+                        jax.tree.map(lambda x: x[None], robot),
+                        variables,
+                        jaxlie.SE3(targets),
+                        jnp.full(n, tcp, dtype=jnp.int32),
+                        jnp.full(n, 250.0),
+                        jnp.full(n, 80.0),
+                    )
+                )
+            else:
+                costs.append(free_space_clearance(variables))
             if self.datafarm:
                 costs.append(
                     make_motion_cost(
@@ -150,7 +161,7 @@ class Planner:
             )
             return solution[variables]
 
-        self.optimize = jax.jit(optimize)
+        self.optimize = jax.jit(optimize, static_argnames=("track_pose",))
         self.fk = jax.jit(robot.forward_kinematics)
 
     def valid_configuration(self, q, allowed_cube=None):
@@ -231,7 +242,8 @@ class Planner:
         )
         return candidates[index]
 
-    def leg(self, start, goal, label, *, allowed_cube=None):
+    def leg(self, start, goal, label, *, allowed_cube=None, track_pose=False):
+        """Fix joint endpoints; only contact legs track intermediate TCP poses."""
         before = time.monotonic()
         u = np.linspace(0.0, 1.0, N_WAYPOINTS)
         initial = start + u[:, None] * (goal - start)
@@ -245,7 +257,9 @@ class Planner:
         )
         targets[:, 4:] = endpoints[0, 4:] + u[:, None] * (endpoints[1, 4:] - endpoints[0, 4:])
         q = np.asarray(
-            self.optimize(jnp.asarray(initial, dtype=jnp.float32), jnp.asarray(targets))
+            self.optimize(
+                jnp.asarray(initial, dtype=jnp.float32), jnp.asarray(targets), track_pose=track_pose
+            )
         ).copy()
         q[0], q[-1] = start, goal
         poses = np.asarray(self.fk(jnp.asarray(q)))[:, self.tcp]
@@ -257,7 +271,11 @@ class Planner:
             np.abs(velocity) <= np.asarray(self.robot.joints.velocity_limits) + 0.005
         )
         if (
-            max_error > 0.015
+            (track_pose and max_error > 0.015)
+            or (
+                not track_pose
+                and np.min(np.asarray(self.fk(jnp.asarray(dense)))[:, self.tcp, 6]) < 0.098
+            )
             or not valid_limits
             or not all(self.valid_configuration(row, allowed_cube) for row in dense)
         ):
@@ -266,13 +284,18 @@ class Planner:
             )
         record = {
             "label": label,
+            "motion_type": "contact" if track_pose else "free",
+            "fixed_joint_waypoints": [0, N_WAYPOINTS - 1],
             "style_cost": float(self.encoder.cost(jnp.asarray(q), SOURCE_DT)),
-            "max_tracking_error_m": max_error,
+            "max_tracking_error_m": max_error if track_pose else None,
+            "max_reference_deviation_m": max_error,
             "planning_seconds": time.monotonic() - before,
         }
         self.leg_records.append(record)
+        deviation_label = "tracking error" if track_pose else "free path deviation"
         print(
-            f"  {label}: style {record['style_cost']:.3f}, tracking {max_error * 1000:.1f} mm",
+            f"  {label}: style {record['style_cost']:.3f}, "
+            f"{deviation_label} {max_error * 1000:.1f} mm",
             flush=True,
         )
         return q

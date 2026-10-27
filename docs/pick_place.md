@@ -14,6 +14,9 @@ uv run --extra planning --extra simulation python examples/pick_place.py --compa
 Run a single mode with `--datafarm` or `--no-datafarm`. `--compare` runs both and
 writes a synchronized, normal-speed split-screen video. The shorter run holds its
 last frame after finishing; neither run is sped up to match the other.
+Learned retiming is enabled by default for DATAFARM (`--retime`). Use `--no-retime`
+to give both modes the same fixed stroke clock and isolate posture selection and
+geometric trajectory optimization. The baseline always uses the fixed clock.
 
 The default output folder is `work/pick-place-comparison/`:
 
@@ -40,8 +43,8 @@ The learned models use the package's pinned Hugging Face downloads and cache.
 | Stage | DataFarm off | DataFarm on |
 | --- | --- | --- |
 | IK | Nearest feasible solution to the current configuration | Minimum posture-GMM NLL among feasible solutions |
-| Trajectory optimization | PyRoki pose tracking, smoothness, acceleration, endpoint, joint and velocity terms | The same terms plus one frozen encoder residual spanning each whole leg |
-| Timing | Fixed source durations, continuous motion through leg joins; rest at gripper events and plan ends | The same source geometry, with smooth regularized encoder-based stroke timing |
+| Trajectory optimization | Fixed joint endpoints, smoothness, acceleration, joint/velocity limits and table clearance; TCP tracking only for contact legs | The same terms plus one frozen encoder residual spanning each whole leg |
+| Timing | Fixed source durations, continuous motion through leg joins; rest at gripper events and plan ends | Learned stroke retiming by default; fixed clock with `--no-retime` |
 | Gripper/physics | Identical opening/closing commands, dwell lengths and contact model | Identical opening/closing commands, dwell lengths and contact model |
 
 The baseline loads the released models only to report comparable NLL/style scores.
@@ -51,9 +54,17 @@ configuration as a warm start. The gripper TCP is exported from MuJoCo into the
 URDF, and PyRoki/MuJoCo FK is checked before planning. Each of the 19 motion legs is
 optimized in PyRoki/jaxls. IK candidates are checked for pose error, joint limits
 and MuJoCo collision geometry. Optimized paths receive denser collision checks.
-The simple scene uses clear vertical approaches and raised transport legs;
-this is local trajectory refinement with known task waypoints, not a general
-obstacle-search/task-planning system.
+Descents to grasp/place and vertical lifts/retreats retain Cartesian tracking.
+Approaches between objects, raised transfers and the return home fix only their
+joint endpoints. Their intermediate positions and orientations are optimization
+variables, with joint/velocity limits, arm/table clearance, and a 10 cm lower
+bound on TCP height. No straight-line pose target or reference-path cost is added
+on those free-space legs. Dense MuJoCo collision checks and the physical replay
+validate the resulting paths. This is local trajectory optimization from a joint
+interpolation seed, not a general obstacle-search/task-planning system.
+Each leg's metadata records its `motion_type`, fixed joint waypoint indices and
+deviation from the straight Cartesian reference. On free-space legs that
+reference is diagnostic only; `max_tracking_error_m` is null.
 
 Intermediate leg endpoints are position constraints, with no duplicated rest
 samples or per-leg minimum-jerk clock. Both modes interpolate a common type of
@@ -66,8 +77,8 @@ boundaries; intermediate legs do not receive individual easing or holds.
 Geometry between source
 waypoints changes slightly; the physics replay checks unintended contacts.
 
-DataFarm mode retimes seven gripper-delimited strokes with 16 clock knots, eight
-starts and 250 Adam iterations by default. `--retime-starts` and
+With `--retime`, DataFarm mode retimes seven gripper-delimited strokes with 16 clock
+knots, eight starts and 250 Adam iterations. `--retime-starts` and
 `--retime-iterations` change these settings. Timing uses a fixed geometric path,
 zero boundary-speed targets for grasps/releases, and checks commanded velocities,
 accelerations and stitched junctions. The demo's retiming caps are 2 rad/s and
@@ -110,6 +121,8 @@ uv run --extra planning --extra simulation python examples/pick_place.py --compa
 # Render/simulate already saved plans without repeating IK/trajopt/retiming:
 uv run --extra planning --extra simulation python examples/pick_place.py --compare --reuse-plan
 ```
+
+When reusing plans, keep `--retime`/`--no-retime` consistent with the saved run.
 
 `--output`, `--asset-cache`, `--fps`, `--width`, and `--height` configure local
 artifacts and rendering. On a headless Linux machine, use MuJoCo's supported EGL
