@@ -16,6 +16,7 @@ import numpy as np
 from _simulation import compare_videos
 from _yam_planning import Planner, plan_arm
 from _yam_scene import ARMS, JOINT_NAMES, build_scene, fetch_assets, initial_state, make_urdf
+from _yam_scene import TARGETS as INDEPENDENT_TARGETS
 from _yam_simulation import simulate
 
 from datafarm_pyroki import (
@@ -86,6 +87,10 @@ def run(args, model, enabled):
     metadata_path = output / "planning.json"
     plan_path = output / "plan.npz"
     retimed = enabled and args.retime
+    if args.handoff:
+        from _yam_handoff import TARGETS, plan_handoffs
+    else:
+        TARGETS = INDEPENDENT_TARGETS
     hashes = {
         f"{arm}/{file}": hashlib.sha256((args.models / arm / file).read_bytes()).hexdigest()
         for arm in ARMS
@@ -93,6 +98,7 @@ def run(args, model, enabled):
     }
     identity = dict(
         version=1,
+        task="handoff_v2" if args.handoff else "independent",
         scene_sha256=hashlib.sha256((args.output / "scene.xml").read_bytes()).hexdigest(),
         solver_iterations=180,
         seed=args.seed,
@@ -112,6 +118,7 @@ def run(args, model, enabled):
     else:
         metadata = dict(identity=identity, arms={}, events=[])
         timelines = []
+        planners = {}
         for arm in ARMS:
             print(f"Planning {name}/{arm}", flush=True)
             planner = Planner(
@@ -123,6 +130,9 @@ def run(args, model, enabled):
                 seed=args.seed,
                 weight=args.encoder_weight,
             )
+            planners[arm] = planner
+            if args.handoff:
+                continue
             steps = plan_arm(planner)
             source = sample_plan(steps, ease_boundaries=False)
             np.savez_compressed(
@@ -136,7 +146,11 @@ def run(args, model, enabled):
                 retiming=records,
                 duration_s=float(timeline.times[-1]),
             )
-        q, times, events = combine(timelines)
+        if args.handoff:
+            q, times, events, records = plan_handoffs(planners, args, arm_timeline)
+            metadata.update(records)
+        else:
+            q, times, events = combine(timelines)
         metadata["events"] = events
         np.savez_compressed(plan_path, positions=q, times=times)
         metadata_path.write_text(json.dumps(metadata, indent=2))
@@ -163,6 +177,8 @@ def run(args, model, enabled):
         width=args.width,
         height=args.height,
         render=not args.no_render,
+        targets=TARGETS,
+        handoff=args.handoff,
     )
     metrics["arms"] = {
         arm: dict(
@@ -174,7 +190,7 @@ def run(args, model, enabled):
     (output / "metrics.json").write_text(json.dumps(metrics, indent=2))
     print(json.dumps(metrics, indent=2), flush=True)
     if (
-        metrics["cubes_on_tray"] != 4
+        metrics["cubes_on_tray"] != len(TARGETS)
         or metrics["unintended_robot_contact_steps"]
         or not all(
             c["lifted"] and c["bilateral_contact_steps"] > 0 for c in metrics["grasp_checks"]
@@ -183,19 +199,31 @@ def run(args, model, enabled):
         raise RuntimeError(
             f"{name}: physical manipulation/collision checks failed; inspect metrics"
         )
+    if args.handoff and not all(
+        c["released_to_receiver"]
+        and c["dual_bilateral_contact_steps"] > 0
+        and c["receiver_support_after_release_steps"] > 20
+        for c in metrics["handoff_checks"]
+    ):
+        raise RuntimeError("A physical handoff validation failed; inspect metrics")
     return metrics
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--compare", action="store_true")
+    p.add_argument(
+        "--handoff",
+        action="store_true",
+        help="Transfer three cubes from the left side to the right via a physical handoff",
+    )
     p.add_argument("--datafarm", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--retime", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--reuse-plan", action="store_true")
     p.add_argument("--no-render", action="store_true")
     p.add_argument("--models", type=Path, default=Path("work/yam/models"))
     p.add_argument("--asset-cache", type=Path, default=Path("work/yam-menagerie"))
-    p.add_argument("--output", type=Path, default=Path("work/yam-pick-place"))
+    p.add_argument("--output", type=Path, default=None)
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--encoder-weight", type=float, default=0.1)
     p.add_argument("--retime-starts", type=int, default=4)
@@ -210,10 +238,17 @@ def main():
         p.error("Retiming starts and iterations must be positive")
     if not np.isfinite(args.encoder_weight) or args.encoder_weight < 0:
         p.error("Encoder weight must be finite and nonnegative")
-    args.output = args.output.resolve()
+    args.output = (
+        args.output or Path("work/yam-handoff" if args.handoff else "work/yam-pick-place")
+    ).resolve()
     args.models = args.models.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
-    model = build_scene(fetch_assets(args.asset_cache), args.output / "scene.xml")
+    settings = {}
+    if args.handoff:
+        from _yam_handoff import scene_settings
+
+        settings = scene_settings()
+    model = build_scene(fetch_assets(args.asset_cache), args.output / "scene.xml", **settings)
     for arm in ARMS:
         make_urdf(model, initial_state(model), arm, args.output / f"{arm}.urdf")
     results = {}

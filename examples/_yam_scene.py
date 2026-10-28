@@ -65,7 +65,15 @@ def fetch_assets(directory: Path):
     return root / "i2rt_yam"
 
 
-def build_scene(assets, output):
+def build_scene(
+    assets,
+    output,
+    *,
+    starts=STARTS,
+    targets=TARGETS,
+    tray_center=(0.41, 0),
+    tray_halfsize=(0.06, 0.43),
+):
     template = ET.parse(assets / "yam_linear_4310.xml").getroot()
     root = ET.Element("mujoco", model="Bimanual YAM — marginal motion priors")
     ET.SubElement(root, "compiler", angle="radian", autolimits="true")
@@ -132,12 +140,12 @@ def build_scene(assets, output):
         "geom",
         name="tray",
         type="box",
-        pos="0.41 0 0.008",
-        size="0.06 0.43 0.008",
+        pos=f"{tray_center[0]} {tray_center[1]} 0.008",
+        size=f"{tray_halfsize[0]} {tray_halfsize[1]} 0.008",
         rgba="0.76 0.83 0.86 1",
         friction="1 .01 .001",
     )
-    for i, xyz in enumerate(TARGETS):
+    for i, xyz in enumerate(targets):
         ET.SubElement(
             world,
             "geom",
@@ -177,7 +185,7 @@ def build_scene(assets, output):
                 prefix(e)
                 parent.append(e)
         world.append(body)
-    for i, (xyz, color) in enumerate(zip(STARTS, COLORS, strict=True)):
+    for i, (xyz, color) in enumerate(zip(starts, COLORS[: len(starts)], strict=True)):
         b = ET.SubElement(world, "body", name=f"cube{i}", pos=" ".join(map(str, xyz)))
         ET.SubElement(b, "freejoint", name=f"cube{i}_free")
         ET.SubElement(

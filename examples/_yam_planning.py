@@ -134,9 +134,11 @@ class Planner:
             c.dist < -0.002 and robot_contact(self.model, c, cube) for c in self.scratch.contact
         )
 
-    def endpoint(self, xyz, current, cube):
+    def endpoint(self, xyz, current, cube, *, orientation=None):
         # Ry(pi): downward tool axis, keeping wrist yaw inside the YAM's limits.
-        target = np.r_[[0.0, 0.0, 1.0, 0.0], xyz].astype(np.float32)
+        if orientation is None:
+            orientation = [0.0, 0.0, 1.0, 0.0]
+        target = np.r_[orientation, xyz].astype(np.float32)
         seeds = self.seeds.copy()
         seeds[0] = current
         seeds[1] = HOME

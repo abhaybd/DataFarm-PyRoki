@@ -109,3 +109,103 @@ def test_native_both_arm_fk_and_unattached_cubes(tmp_path):
             np.testing.assert_allclose(
                 actual, data.site_xpos[model.site(arm + "_grasp_site").id], atol=3e-6
             )
+
+
+def test_handoff_barriers_survive_unequal_arm_timing():
+    from _yam_handoff import STARTS, TARGETS, plan_handoffs
+    from _yam_scene import ARMS
+
+    assert np.all(STARTS[:, 1] > 0) and np.all(TARGETS[:, 1] < 0)
+
+    def joint(name):
+        if name.startswith("cube"):
+            index = 40 + 7 * int(name[4])
+        else:
+            arm = 0 if name.startswith("left_") else 1
+            tail = name.split("_", 1)[1]
+            index = arm * 8 + (
+                int(tail[5:]) - 1 if tail.startswith("joint") else 6 + (tail.startswith("right_"))
+            )
+        return SimpleNamespace(qposadr=[index])
+
+    model = SimpleNamespace(joint=joint)
+    planners = {
+        arm: SimpleNamespace(
+            arm=arm,
+            model=model,
+            scratch=SimpleNamespace(qpos=np.zeros(80)),
+            ik_records=[],
+            leg_records=[],
+            endpoint=lambda xyz, current, cube, orientation: np.r_[xyz, np.zeros(3)],
+            leg=lambda a, b, *args, **kwargs: np.stack([a, b]),
+        )
+        for arm in ARMS
+    }
+
+    def timeline(planner, steps, args):
+        # Receiver is deliberately slower; all gripper events must wait for it.
+        duration = len(steps) * (3.0 if planner.arm == "right" else 2.0)
+        return SimpleNamespace(
+            positions=np.stack([steps[0].positions[0], steps[-1].positions[-1]]),
+            times=np.array([0.0, duration]),
+        ), []
+
+    q, t, events, records = plan_handoffs(planners, None, timeline)
+    assert q.shape[1] == 12 and np.all(np.diff(t) > 0)
+    assert len(events) > 0
+    for cube in range(3):
+        commands = [e for e in events if e["command"].get("cube") == cube]
+        assert [(e["command"]["arm"], e["command"]["action"]) for e in commands] == [
+            ("left", "close"),
+            ("right", "close"),
+            ("left", "open"),
+            ("right", "open"),
+        ]
+        assert commands[2]["time"] >= commands[1]["time"] + 0.65 - 1e-9
+        receive = next(
+            p
+            for p in records["phases"]
+            if p["cube"] == cube and p["label"] == "receiver approaches"
+        )
+        assert commands[1]["time"] >= receive["start_s"] + receive["duration_s"] - 1e-9
+        # Giver remains stationary throughout receiver acquisition.
+        rows = (t >= receive["start_s"] + 0.01) & (t <= receive["start_s"] + receive["duration_s"])
+        np.testing.assert_allclose(q[rows, :6], np.broadcast_to(q[rows, :6][0], q[rows, :6].shape))
+
+
+def test_shared_phase_dilation_preserves_geometry_and_meets_motion_caps():
+    from _yam_handoff import enforce_phase_limits
+
+    t = np.linspace(0, 0.1, 101)
+    q = np.tile((0.5 * (1 - np.cos(np.pi * t / t[-1])))[:, None], (1, 12))
+    stretched, scale = enforce_phase_limits(q, t)
+    assert scale > 1 and stretched[-1] > t[-1]
+    velocity = np.gradient(q, stretched, axis=0)
+    acceleration = np.gradient(velocity, stretched, axis=0)
+    assert np.abs(velocity).max() <= 2 and np.abs(acceleration).max() <= 20
+
+
+def test_giver_release_is_blocked_without_receiver_contact(tmp_path):
+    from _yam_handoff import TARGETS, scene_settings
+    from _yam_scene import HOME, MENAGERIE_COMMIT, build_scene
+    from _yam_simulation import simulate
+
+    assets = ROOT / "work/yam-menagerie" / MENAGERIE_COMMIT / "i2rt_yam"
+    if not (assets / "yam_linear_4310.xml").exists():
+        pytest.skip("Run the demo to populate optional YAM assets")
+    model = build_scene(assets, tmp_path / "scene.xml", **scene_settings())
+    events = [dict(time=0.0, command=dict(arm="left", action="open", cube=0, handoff=True))]
+    with pytest.raises(RuntimeError, match="giver release blocked"):
+        simulate(
+            model,
+            np.tile(np.r_[HOME, HOME], (2, 1)),
+            np.array([0.0, 0.02]),
+            events,
+            tmp_path,
+            enabled=False,
+            retimed=False,
+            render=False,
+            targets=TARGETS,
+            handoff=True,
+        )
+    assert (tmp_path / "handoff_failure.npz").exists()

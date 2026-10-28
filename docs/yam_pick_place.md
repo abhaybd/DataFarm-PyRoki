@@ -1,8 +1,8 @@
-# Bimanual YAM pick-and-place comparison
+# Bimanual YAM handoff comparison
 
 ```sh
 uv sync --extra planning --extra simulation
-MUJOCO_GL=egl uv run --extra planning --extra simulation python examples/yam_pick_place.py --compare
+MUJOCO_GL=egl uv run --extra planning --extra simulation python examples/yam_pick_place.py --handoff --compare
 ```
 
 This example uses the trained models under `work/yam/models/{left,right}/` by
@@ -11,12 +11,23 @@ names; see [training](training.md). Each arm uses its own six-joint posture GMM,
 24-channel encoder, normalization, and latent reference statistics. Model names,
 ordered joints, and the native 30 Hz model clock are checked explicitly.
 
-Two YAMs simultaneously move two cubes each onto a common tray. Both modes use
+Three cubes start on the left arm's side; the tray is entirely on the right
+arm's side. The left arm picks and presents each cube at the center, and the right
+arm acquires it and places it on the tray. The hands approach from opposite
+directions and grip orthogonal cube faces, leaving space for both physical
+grippers. The robot retains its native joint conventions throughout.
+
+The sequence waits for the receiver to reach the cube and close for 0.65 seconds
+before opening the giver. At execution time, giver release is blocked unless
+the receiver has bilateral contact. The giver withdraws before the receiver
+transports the cube; giver return and receiver placement can run concurrently.
+
+Both modes use
 the same scene, seed bank, object positions, constraints, controller gains,
 contact physics, and gripper dwell times. The baseline selects nearest feasible
 IK branches and optimizes smoothness with a fixed trajectory clock. DATAFARM
 selects feasible branches using the corresponding arm's GMM, adds that arm's
-whole-leg encoder cost, and retimes its gripper-delimited segments. The default
+whole-leg encoder cost, and retimes its synchronized task phases. The default
 learned-cost weight is 0.1; the constrained local solver has a 180-iteration
 budget in both modes. `--no-retime` isolates posture/path effects.
 
@@ -27,9 +38,13 @@ collision checks sample optimized paths densely. Synchronized playback then
 checks actual inter-arm, robot/table, and robot/object contacts. This is a local
 planner for this specified scene, not general obstacle search or task planning.
 
-The single-arm timing API is applied separately to each marginal model. Timelines
-are combined at a common ~20 ms output clock, preserving both grippers' event
-times; an arm that finishes early holds its final configuration. Physics advances
+The single-arm timing API is applied separately to each marginal model within
+each shared phase. The phase lasts until both arms finish, then its gripper
+events execute; an arm that finishes early holds position. Retiming therefore
+preserves receiver-close, giver-release, and withdrawal barriers. A uniform
+phase dilation, shared by both modes, enforces the 2 rad/s and 20 rad/s² caps if
+interpolation would exceed them; its factor is recorded in `planning.json`.
+Commands use a common ~20 ms output clock. Physics advances
 at 2 ms. The video is 30 fps at normal speed, with the shorter comparison holding
 its final frame. These clocks are distinct from the encoders' 30 Hz sampling rate.
 
@@ -40,14 +55,16 @@ against Git blob hashes. The URDF for each arm is exported from the compiled
 MuJoCo kinematics, and TCP agreement is verified before planning. Both arms keep
 their native I2RT joint conventions; the right arm is not mirrored in joint space.
 
-Grasps use the physical parallel-jaw pads and friction. All four cubes have free
+Grasps use the physical parallel-jaw pads and friction. All three cubes have free
 joints: there are no object welds, attachments, or pose overrides during playback.
 The demo requires bilateral finger contact and a lift above 9 cm for every cube,
-four final placements within 3.5 cm of their targets, and no unintended robot
+three final placements within 3.5 cm of their targets, and no unintended robot
 penetrations deeper than 1.5 mm. Those measured checks are recorded rather than
-inferred from the planned end-effector path.
+inferred from the planned end-effector path. Handoff checks additionally record
+simultaneous bilateral contact in both hands, bilateral receiver contact at
+giver release, and receiver-supported airborne steps after the giver opens.
 
-Outputs under `work/yam-pick-place/`:
+Outputs under `work/yam-handoff/`:
 
 - `comparison.mp4`: baseline left, DATAFARM right, at the same wall-clock time.
 - `comparison.json`: actual manipulation, timing, tracking, and learned-cost metrics.
@@ -62,3 +79,7 @@ plans and rejects changed scene, model, or planning settings. `--fps`, `--width`
 `--height`, `--retime-starts`, and `--retime-iterations` configure rendering and
 timing optimization. The displayed style score is an optimized model objective;
 its reduction alone does not demonstrate human preference or broader task success.
+
+The earlier independent four-cube comparison remains available by omitting
+`--handoff`; it writes to `work/yam-pick-place/` and lets the arms finish on
+independent clocks. The handoff and independent modes retain separate artifacts.
