@@ -350,6 +350,12 @@ metrics. See [docs/pick_place.md](docs/pick_place.md) for setup, controls and sc
 
 ## Checkpoint provenance and reproduction
 
+To train separate left/right YAM posture priors and PyTorch motion encoders from
+a balanced ABC/MolmoAct2 mixture at their native 30 Hz, see
+[YAM training](docs/training.md). This pipeline vendors the small upstream encoder
+core, requires no DATAFARM fork or planner installation, and exports both original
+and JAX artifact formats.
+
 The default Hub revisions and SHA256 hashes are pinned in
 `src/datafarm_pyroki/assets.py`. Original source/checksums are tracked in
 `src/datafarm_pyroki/assets/provenance.json`; the joint prior has its own

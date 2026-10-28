@@ -6,9 +6,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uv sync --frozen --extra planning --extra simulation
+      - run: uv sync --frozen --extra planning --extra simulation --extra training
       - run: uv run --frozen ruff check .
       - run: uv run --frozen ruff format --check .
       - name: Prepare model checkpoints
         run: uv run --frozen python scripts/fetch_assets.py
-      - run: uv run --frozen --extra planning --extra simulation pytest
+      - run: uv run --frozen --extra planning --extra simulation --extra training pytest

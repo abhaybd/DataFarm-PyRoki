@@ -14,6 +14,7 @@ dependencies = ["huggingface-hub>=2.3,<3", "jax>=0.6.0", "numpy>=1.26", "scipy>=
 [project.optional-dependencies]
 planning = ["pyroki", "jaxls"]
 simulation = ["mujoco>=3.3,<4", "imageio[pyav]>=2.37,<3", "pillow>=11"]
+training = ["torch>=2.6", "pyarrow>=18", "scikit-learn>=1.5", "fsspec>=2024.10"]
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.11", "torch>=2.6"]
