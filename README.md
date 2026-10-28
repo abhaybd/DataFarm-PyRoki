@@ -336,6 +336,14 @@ option applies before trajectory segment retiming.
 
 ## MuJoCo three-cube comparison
 
+For the trained left/right YAM marginals, the
+[bimanual YAM demo](docs/yam_pick_place.md) runs four physical cube transfers with
+independent per-arm priors and a synchronized DataFarm off/on comparison video:
+
+```sh
+MUJOCO_GL=egl uv run --extra planning --extra simulation python examples/yam_pick_place.py --compare
+```
+
 ```sh
 uv run --extra planning --extra simulation python examples/pick_place.py --compare
 ```
