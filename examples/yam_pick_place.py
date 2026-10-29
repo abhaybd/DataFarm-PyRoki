@@ -45,8 +45,8 @@ def arm_timeline(planner, steps, args):
         interpolate_plan(steps),
         joint_map=planner.mapping,
         output_dt=0.02,
-        velocity_limits=np.full(6, 2.0),
-        acceleration_limits=np.full(6, 20.0),
+        velocity_limits=np.full(len(planner.mapping.robot_joint_names), 2.0),
+        acceleration_limits=np.full(len(planner.mapping.robot_joint_names), 20.0),
         boundary_speed=0.0,
         config=config,
     )

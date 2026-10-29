@@ -359,7 +359,7 @@ class Corpus:
         return np.flatnonzero(mask)
 
     def joint(self, index: int, arm: str) -> np.ndarray:
-        columns = {"left": slice(0, 6), "right": slice(6, 12)}[arm]
+        columns = {"left": slice(0, 6), "right": slice(6, 12), "bimanual": slice(0, 12)}[arm]
         return self.positions[self.offsets[index] : self.offsets[index + 1], columns]
 
 

@@ -43,7 +43,7 @@ def _episode(index):
     windows = list(window_variants(corpus.joint(index, arm), count, seed + int(index), max_length))
     targets = []
     series = []
-    sums = np.zeros((2, 24), np.float64)
+    sums = np.zeros((2, 4 * windows[0].shape[1]), np.float64)
     total = 0
     for q in windows:
         tr = Traj(str(corpus.sources[index]), str(corpus.ids[index]), q, COMMON_RATE, len(q))
@@ -89,18 +89,22 @@ def prepare_features(
             raise ValueError("Feature-cache recipe mismatch")
         return root
     root.mkdir(parents=True, exist_ok=True)
+    joints = corpus.joint(0, arm).shape[1]
+    names = list(
+        fingerprint(Traj("", "", np.zeros((MIN_RAW_LEN, joints)), COMMON_RATE, MIN_RAW_LEN))
+    )
     train_count = len(corpus.indices("train")) * (crops + 1)
     count = train_count + len(corpus.indices("val"))
     x = np.lib.format.open_memmap(
-        root / "series.npy", mode="w+", dtype=np.float32, shape=(count, max_length, 24)
+        root / "series.npy", mode="w+", dtype=np.float32, shape=(count, max_length, 4 * joints)
     )
-    y = np.empty((count, 99), np.float64)
+    y = np.empty((count, len(names)), np.float64)
     lengths = np.empty(count, np.int32)
     sources = np.empty(count, dtype="U10")
     splits = np.empty(count, dtype="U5")
     episodes = np.empty(count, np.int64)
     order = np.concatenate((corpus.indices("train"), corpus.indices("val")))
-    moments, frames, cursor = np.zeros((2, 24), np.float64), 0, 0
+    moments, frames, cursor = np.zeros((2, 4 * joints), np.float64), 0, 0
     print(
         f"[features] {arm}: {train_count} training windows, "
         f"{count - train_count} validation windows",
@@ -145,7 +149,6 @@ def prepare_features(
     csd = np.sqrt(np.maximum(0.0, moments[1] / frames - cmu**2)) + 1e-6
     impute, fmu, fsd = fit_target_statistics(y[:train_count])
     y = ((np.where(np.isfinite(y), y, impute) - fmu) / fsd).astype(np.float32)
-    names = list(fingerprint(Traj("", "", np.zeros((MIN_RAW_LEN, 6)), COMMON_RATE, MIN_RAW_LEN)))
     np.savez(
         root / "metadata.npz",
         targets=y,

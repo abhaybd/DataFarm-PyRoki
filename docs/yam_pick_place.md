@@ -1,5 +1,9 @@
 # Bimanual YAM handoff comparison
 
+For the controlled **off / independent encoders / joint encoder** experiment,
+see [the joint bimanual motion encoder](bimanual_encoder.md). That comparison
+uses a common 12-joint planner and shared phase clock in all three conditions.
+
 ```sh
 uv sync --extra planning --extra simulation
 MUJOCO_GL=egl uv run --extra planning --extra simulation python examples/yam_pick_place.py --handoff --compare

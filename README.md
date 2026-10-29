@@ -350,6 +350,11 @@ optimize direct motions with scene and carried-cube collision-distance constrain
 This experiment writes to `work/yam-handoff-direct/`; the original handoff demo
 retains its own outputs.
 
+To compare DATAFARM off, independent motion encoders, and a single synchronized
+12-joint motion encoder, see the [bimanual encoder experiment](docs/bimanual_encoder.md).
+Posture priors stay separate; the three-way demo uses a common joint planner and
+shared timing API for all conditions.
+
 ```sh
 uv run --extra planning --extra simulation python examples/pick_place.py --compare
 ```

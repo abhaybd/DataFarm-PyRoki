@@ -1,4 +1,4 @@
-"""Train separate left/right YAM posture priors and original-architecture PyTorch encoders.
+"""Train marginal or synchronized bimanual original-architecture PyTorch encoders.
 
 Run ``python -m datafarm_pyroki.training.train --help``. Defaults match DATAFARM's
 optimizer, loss, latent size, episode/crop counts, and training budget. YAM uses 30 Hz.
@@ -123,7 +123,9 @@ def validation_loss(model, batches, ids, weights, cfg):
 
 def train_encoder(cache: FeatureCache, cfg: TrainConfig, device, out: Path, *, preload=True):
     torch.manual_seed(cfg.seed)
-    model = TrajectoryEncoder(24, cfg.latent, 99, p=cfg.dropout).to(device)
+    channels = cache.series.shape[-1]
+    targets = len(cache.metadata["feat_names"])
+    model = TrajectoryEncoder(channels, cfg.latent, targets, p=cfg.dropout).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, cfg.epochs)
     weights = torch.as_tensor(
@@ -320,6 +322,9 @@ def train_arm(
         "gmm_episodes_per_source": gmm_episodes,
         "gmm_validation_frames": gmm_val_frames,
     }
+    if arm == "bimanual":
+        run = {k: v for k, v in run.items() if not k.startswith("gmm_")}
+        run["posture_priors"] = "separate existing left/right artifacts; no joint GMM fitted"
     run_path = out / "run.json"
     if run_path.exists() and json.loads(run_path.read_text()) != run:
         raise ValueError("Output directory belongs to a different run")
@@ -332,29 +337,31 @@ def train_arm(
                 raise ValueError(f"Completed artifact checksum mismatch: {out / name}")
         print(f"[train] {arm}: verified completed run", flush=True)
         return
-    posture = fit_posture(
-        corpus,
-        arm,
-        out,
-        components=gmm_components,
-        frames=gmm_frames,
-        episodes_per_source=gmm_episodes,
-        seed=cfg.seed,
-        validation_frames=gmm_val_frames,
-    )
+    posture = None
+    if arm != "bimanual":
+        posture = fit_posture(
+            corpus,
+            arm,
+            out,
+            components=gmm_components,
+            frames=gmm_frames,
+            episodes_per_source=gmm_episodes,
+            seed=cfg.seed,
+            validation_frames=gmm_val_frames,
+        )
     cache = FeatureCache(
         prepare_features(corpus, arm, feature_root, crops=cfg.crops, seed=cfg.seed, workers=workers)
     )
     model, metrics = train_encoder(cache, cfg, device, out, preload=preload)
     stats, stats_report = reference_statistics(model, corpus, arm, cache.metadata, cfg, device)
-    names = JOINT_NAMES[:6] if arm == "left" else JOINT_NAMES[6:]
+    names = {"left": JOINT_NAMES[:6], "right": JOINT_NAMES[6:], "bimanual": JOINT_NAMES}[arm]
     blob = {
         "kind": "filterbank",
         "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
-        "ch": 24,
+        "ch": 4 * len(names),
         "latent": cfg.latent,
-        "n_feat": 99,
-        "n_joints": 6,
+        "n_feat": len(cache.metadata["feat_names"]),
+        "n_joints": len(names),
         "embed_dim": cfg.latent,
         "source_rate": COMMON_RATE,
         "sample_rate_hz": COMMON_RATE,
@@ -385,7 +392,7 @@ def train_arm(
         out / "encoder_report.json",
         {**run, "metrics": metrics, "reference": stats_report, "posture": posture},
     )
-    write_checksums(out)
+    write_checksums(out, encoder_only=arm == "bimanual")
     atomic_json(
         out / "progress.json", {"phase": "complete", "selected_epoch": metrics["selected_epoch"]}
     )
@@ -401,7 +408,9 @@ def main():
     parser.add_argument("--corpus", type=Path, default=Path("work/yam/corpus"))
     parser.add_argument("--out", type=Path, default=Path("work/yam/models"))
     parser.add_argument("--feature-cache", type=Path, default=Path("work/yam/features"))
-    parser.add_argument("--arms", nargs="+", choices=("left", "right"), default=["left", "right"])
+    parser.add_argument(
+        "--arms", nargs="+", choices=("left", "right", "bimanual"), default=["left", "right"]
+    )
     parser.add_argument("--gpu", type=int, default=3, help="Physical GPU index; exposed as cuda:0")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     parser.add_argument("--workers", type=int, default=16)

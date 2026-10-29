@@ -15,15 +15,16 @@ import jax
 import jax.numpy as jnp
 import mujoco
 import numpy as np
-from _yam_scene import ARM_NAMES
+from _yam_scene import ARM_NAMES, JOINT_NAMES
 
 
 class SceneDistances:
-    def __init__(self, model, arm):
+    def __init__(self, model, arm, *, coupled=False):
         self.model, self.arm = model, arm
         self.data = mujoco.MjData(model)
-        self.qpos = np.array([model.joint(n).qposadr[0] for n in ARM_NAMES[arm]])
-        self.dofs = np.array([model.joint(n).dofadr[0] for n in ARM_NAMES[arm]])
+        names = JOINT_NAMES if coupled else ARM_NAMES[arm]
+        self.qpos = np.array([model.joint(n).qposadr[0] for n in names])
+        self.dofs = np.array([model.joint(n).dofadr[0] for n in names])
         self.site = model.site(f"{arm}_grasp_site").id
         self.flange = model.body(f"{arm}_link_6").id
         bodies = [model.body(int(b)).name for b in model.geom_bodyid]
@@ -80,7 +81,7 @@ class SceneDistances:
                 self.evaluate,
                 (
                     jax.ShapeDtypeStruct((self.count,), q.dtype),
-                    jax.ShapeDtypeStruct((self.count, 6), q.dtype),
+                    jax.ShapeDtypeStruct((self.count, len(names)), q.dtype),
                 ),
                 q,
                 state,
@@ -96,14 +97,16 @@ class SceneDistances:
 
         self.distance = distance
 
-    def context(self, data, *, allowed_cube=None, carried_cube=None):
+    def context(self, data, *, allowed_cube=None, carried_cube=None, carrier_arm=None):
         """Snapshot all poses and the rigid TCP-to-cube transform for this leg."""
         mujoco.mj_forward(self.model, data)
+        carrier_arm = self.arm if carrier_arm is None else carrier_arm
+        site = self.model.site(f"{carrier_arm}_grasp_site").id
         offset, rotation = np.zeros(3), np.eye(3)
         if carried_cube is not None:
             body = self.model.body(f"cube{carried_cube}").id
-            tcp_rotation = data.site_xmat[self.site].reshape(3, 3)
-            offset = tcp_rotation.T @ (data.xpos[body] - data.site_xpos[self.site])
+            tcp_rotation = data.site_xmat[site].reshape(3, 3)
+            offset = tcp_rotation.T @ (data.xpos[body] - data.site_xpos[site])
             rotation = tcp_rotation.T @ data.xmat[body].reshape(3, 3)
         return np.r_[
             data.qpos,
@@ -111,6 +114,7 @@ class SceneDistances:
             -1 if carried_cube is None else carried_cube,
             offset,
             rotation.ravel(),
+            int(carrier_arm == "right"),
         ].astype(np.float32)
 
     def evaluate(self, q, state):
@@ -141,17 +145,21 @@ class SceneDistances:
         data.qpos[self.qpos] = q
         mujoco.mj_forward(model, data)
         carried_geom = self.cubes[carried] if carried >= 0 else -1
+        carrier_flange = self.flange
         if carried >= 0:
             tail = state[model.nq + 2 :]
-            rot = data.site_xmat[self.site].reshape(3, 3)
+            carrier_arm = "right" if int(tail[12]) else "left"
+            carrier_site = model.site(f"{carrier_arm}_grasp_site").id
+            carrier_flange = model.body(f"{carrier_arm}_link_6").id
+            rot = data.site_xmat[carrier_site].reshape(3, 3)
             adr = model.joint(f"cube{carried}_free").qposadr[0]
-            data.qpos[adr : adr + 3] = data.site_xpos[self.site] + rot @ tail[:3]
+            data.qpos[adr : adr + 3] = data.site_xpos[carrier_site] + rot @ tail[:3]
             mujoco.mju_mat2Quat(
-                data.qpos[adr + 3 : adr + 7], (rot @ tail[3:].reshape(3, 3)).ravel()
+                data.qpos[adr + 3 : adr + 7], (rot @ tail[3:12].reshape(3, 3)).ravel()
             )
             mujoco.mj_forward(model, data)
         values = np.full(self.count, 0.06, q.dtype)
-        jacobian = np.zeros((self.count, 6), q.dtype)
+        jacobian = np.zeros((self.count, len(self.dofs)), q.dtype)
         fromto = np.empty(6)
         jac = np.empty((3, model.nv))
         for group, pairs in enumerate(self.groups):
@@ -200,7 +208,7 @@ class SceneDistances:
                 continue
             normal *= (1 if values[group] >= 0 else -1) / length
             for geom, point, sign in ((a, segment[:3], -1), (b, segment[3:], 1)):
-                body = self.flange if geom == carried_geom else int(model.geom_bodyid[geom])
+                body = carrier_flange if geom == carried_geom else int(model.geom_bodyid[geom])
                 mujoco.mj_jac(model, data, jac, None, point, body)
                 jacobian[group] += sign * normal @ jac[:, self.dofs]
         result = values, jacobian

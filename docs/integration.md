@@ -49,6 +49,9 @@ TCP targets. Calls with the same shapes/dtypes reuse the compiled optimizer.
 `encoder_weight=0` supplies the corresponding baseline solver.
 Returned boundary positions are exact. All constraints are rechecked after
 restoring those boundaries, including adjacent velocity/collision constraints.
+An `InfeasibleTrajectoryError` can carry `positions` and
+`max_constraint_violation` for diagnostics or a warm-start retry. Those positions
+are rejected candidates; a subsequent solve must validate them before execution.
 
 ```python
 from datafarm_pyroki.integration import make_leg_solver

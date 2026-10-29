@@ -65,6 +65,13 @@ class LegResult:
 class InfeasibleTrajectoryError(RuntimeError):
     """The local optimizer did not return a trajectory satisfying the requested constraints."""
 
+    def __init__(self, message, *, positions=None, max_constraint_violation=None):
+        super().__init__(message)
+        # A finite rejected candidate can seed a later solve. It is never an
+        # accepted trajectory and must pass the complete constraint check anew.
+        self.positions = positions
+        self.max_constraint_violation = max_constraint_violation
+
 
 class LegSolver:
     """A reusable leg optimizer; runtime context changes do not rebuild its cost graph."""
@@ -122,7 +129,9 @@ class LegSolver:
         ):
             raise InfeasibleTrajectoryError(
                 f"Constraint violation {violation:.6g} exceeds tolerance "
-                f"{self.constraint_tolerance}"
+                f"{self.constraint_tolerance}",
+                positions=result,
+                max_constraint_violation=violation,
             )
         return LegResult(
             result,

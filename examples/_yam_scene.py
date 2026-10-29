@@ -279,3 +279,21 @@ def make_urdf(model, data, arm, output):
     ET.SubElement(joint, "origin", xyz=" ".join(map(str, offset)), rpy=" ".join(map(str, rpy)))
     ET.indent(root)
     ET.ElementTree(root).write(output, encoding="unicode")
+
+
+def make_bimanual_urdf(directory, output):
+    """Join the two exported chains at their common world, preserving native names."""
+    root = ET.Element("robot", name="bimanual_yam")
+    ET.SubElement(root, "link", name="world")
+    for arm in ARMS:
+        chain = ET.parse(directory / f"{arm}.urdf").getroot()
+        for element in chain:
+            if element.tag == "link" and element.get("name") == "world":
+                continue
+            for item in element.iter():
+                for attribute in ("name", "link"):
+                    if item.get(attribute) == "tcp":
+                        item.set(attribute, f"{arm}_tcp")
+            root.append(element)
+    ET.indent(root)
+    ET.ElementTree(root).write(output, encoding="unicode")

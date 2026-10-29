@@ -34,7 +34,7 @@ def enforce_phase_limits(q, times):
     return times * scale, scale
 
 
-def plan_handoffs(planners, args, timeline_fn):
+def plan_handoffs(planners, args, timeline_fn, *, joint_planner=None):
     """Optimize each arm with its own model; synchronize before every ownership change.
 
     The receiver must reach its grasp, close and dwell before the giver opens.
@@ -74,6 +74,9 @@ def plan_handoffs(planners, args, timeline_fn):
         cursor = float(timestamps[-1][-1])
 
     def phase(label, motions, cube):
+        if joint_planner is not None:
+            joint_phase(label, motions, cube)
+            return
         before = {a: current[a].copy() for a in ARMS}
         timelines = {}
         phase_records = {}
@@ -136,6 +139,66 @@ def plan_handoffs(planners, args, timeline_fn):
             )
         )
         append(q, local)
+
+    def joint_phase(label, motions, cube):
+        """Use the same task barriers with a single 12-joint path and clock."""
+        if not direct or any(len(steps) != 1 for steps in motions.values()):
+            raise ValueError("Joint phases require direct transfers with one goal per moving arm")
+        scratch()
+        scene = planners["left"].scratch.qpos.copy()
+        start = np.r_[current["left"], current["right"]]
+        goals = {a: current[a].copy() for a in ARMS}
+        tracking = []
+        for arm in ARMS:
+            if arm not in motions:
+                tracking.append(False)
+                continue
+            xyz, orientation, track, _ = motions[arm][0]
+            tracking.append(track)
+            goals[arm] = (
+                HOME.copy()
+                if xyz is None
+                else planners[arm].endpoint(xyz, current[arm], cube, orientation=orientation)
+            )
+        goal = np.r_[goals["left"], goals["right"]]
+        path, record = joint_planner.solve(
+            start,
+            goal,
+            scene,
+            [a in motions for a in ARMS],
+            tracking,
+            held,
+            cube,
+            f"cube {cube + 1}: {label}",
+        )
+        timeline, retiming = timeline_fn(joint_planner, [MotionLeg(path, 0.1, label)], args)
+        minimum = joint_planner.validate(timeline.positions)
+        local, scale = enforce_phase_limits(timeline.positions, timeline.times)
+        duration = float(local[-1])
+        events.append(
+            dict(time=cursor, command=dict(action="phase", label=f"cube {cube + 1}: {label}"))
+        )
+        phases.append(
+            dict(
+                label=label,
+                cube=cube,
+                start_s=cursor,
+                duration_s=duration,
+                arms={a: dict(duration_s=duration, retiming=retiming) for a in motions},
+                joint=record,
+                shared_retiming=retiming,
+                minimum_geometry_distance_m=minimum,
+                motion_limit_time_scale=scale,
+            )
+        )
+        append(timeline.positions, local)
+        for arm in ARMS:
+            current[arm] = goals[arm]
+            if arm in motions:
+                arm_retiming[arm].extend(retiming)
+        if any(c is not None for c in held.values()):
+            pose = joint_planner.payload_pose(path[-1], cube)
+            object_at(cube, pose[:3], pose[3:])
 
     def grip(arm, action, cube, dwell, *, handoff=False):
         closed[arm] = action == "close"

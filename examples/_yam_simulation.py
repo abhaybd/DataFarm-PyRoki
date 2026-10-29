@@ -30,15 +30,23 @@ def annotate(
     handoffs=None,
     phase="",
     direct=False,
+    variant=None,
 ):
     image = Image.fromarray(frame)
     draw = ImageDraw.Draw(image, "RGBA")
     accent = (77, 225, 181) if enabled else (108, 170, 255)
+    if variant == "independent":
+        accent = (239, 169, 80)
     draw.rectangle((0, 0, width, 92), fill=(10, 17, 29, 245))
     draw.rounded_rectangle((20, 20, 28, 69), radius=4, fill=(*accent, 255))
+    heading = "DATAFARM ON" if enabled else "BASELINE · DATAFARM OFF"
+    if variant in ("independent", "bimanual"):
+        heading = f"DATAFARM · {variant.upper()} ENCODER" + (
+            "S" if variant == "independent" else ""
+        )
     draw.text(
         (42, 12),
-        "DATAFARM ON" if enabled else "BASELINE · DATAFARM OFF",
+        heading,
         font=_font(25),
         fill="white",
     )
@@ -47,12 +55,20 @@ def annotate(
         if enabled
         else "Nearest feasible IK · smoothness trajopt · fixed timing"
     )
+    if variant is not None:
+        detail = (
+            "Separate posture priors · joint path solve + shared learned clock"
+            if enabled
+            else "Nearest feasible IK · joint smoothness solve · fixed clock"
+        )
     draw.text((42, 45), detail, font=_font(15), fill=(180, 195, 215))
     subtitle = "BIMANUAL YAM  /  6 DoF per arm  /  independent 30 Hz models"
     if handoffs is not None:
         subtitle = "SOURCE → HANDOFF → TARGET  /  independent 30 Hz arm models"
     if direct:
         subtitle = "DIRECT GRASP / PLACE  ·  scene geometry constraints  ·  6 DoF arm models"
+    if variant is not None:
+        subtitle = "DIRECT GRASP / PLACE  ·  12-joint planning  ·  matched scene and controller"
     draw.text(
         (42, 66),
         subtitle,
@@ -91,6 +107,7 @@ def simulate(
     targets=TARGETS,
     handoff=False,
     direct=False,
+    variant=None,
 ):
     data = initial_state(model)
     count = len(targets)
@@ -199,6 +216,7 @@ def simulate(
             handoffs=int(released.sum()) if handoff else None,
             phase=phase,
             direct=direct,
+            variant=variant,
         )
 
     camera = mujoco.MjvCamera()

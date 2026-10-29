@@ -185,34 +185,43 @@ def test_paired_windows_and_training_only_imputation(tmp_path):
     np.testing.assert_array_equal(corpus.joint(0, "left"), left)
 
 
-def test_cpu_training_exports_load_in_torch_and_jax_and_resume(tmp_path):
+@pytest.mark.parametrize("arm", ["left", "bimanual"])
+def test_cpu_training_exports_load_in_torch_and_jax_and_resume(tmp_path, arm):
     corpus = synthetic_corpus(tmp_path / "corpus")
     torch.set_num_threads(1)
     cfg = TrainConfig(
         epochs=1, steps=2, batch=4, crops=1, stats_segments=20, stats_batch=4, eval_batch=2
     )
-    out = tmp_path / "left"
-    args = (corpus, "left", cfg, "cpu", out, tmp_path / "features", 1, False, 2, 200, 4, 100)
+    out = tmp_path / arm
+    args = (corpus, arm, cfg, "cpu", out, tmp_path / "features", 1, False, 2, 200, 4, 100)
     train_arm(*args)
     encoder = load_encoder(out / "encoder.npz")
-    prior = load_joint_prior(out / "posture_prior.npz")
+    names = JOINT_NAMES if arm == "bimanual" else JOINT_NAMES[:6]
+    joints = len(names)
     assert encoder.spec.sample_rate_hz == 30
-    assert encoder.spec.joint_names == tuple(JOINT_NAMES[:6]) == prior.joint_names
+    assert encoder.spec.joint_names == tuple(names)
+    if arm == "bimanual":
+        assert not (out / "posture_prior.npz").exists()
+        assert not (out / "posture_ref.npz").exists()
+    else:
+        prior = load_joint_prior(out / "posture_prior.npz")
+        assert prior.joint_names == tuple(names)
     blob = torch.load(out / "encoder.pt", map_location="cpu", weights_only=False)
-    assert (blob["ch"], blob["n_joints"], blob["n_feat"]) == (24, 6, 99)
-    model = TrajectoryEncoder(24, 16, 99).eval()
+    assert (blob["ch"], blob["n_joints"], blob["n_feat"]) == (4 * joints, joints, 14 * joints + 15)
+    model = TrajectoryEncoder(4 * joints, 16, 14 * joints + 15).eval()
     model.load_state_dict(blob["state_dict"], strict=True)
-    q = np.asarray(corpus.joint(0, "left"))
+    q = np.asarray(corpus.joint(0, arm))
     x = ((metric_series(q) - blob["chan_mu"]) / blob["chan_sd"]).T[None].astype(np.float32)
     with torch.no_grad():
         mu, _ = model.encode(torch.tensor(x), torch.ones(1, 1, len(q)))
     np.testing.assert_allclose(encoder.encode(x)[0], mu.numpy(), rtol=1e-4, atol=1e-6)
-    assert np.isfinite(prior.nll(q)).all()
-    with np.load(out / "posture_ref.npz", allow_pickle=False) as z:
-        assert str(z["model"]) == "gmm" and int(z["n_joints"]) == 6
-        np.testing.assert_allclose(
-            z["gmm_prec_chol"], np.asarray(prior.precision_factors), rtol=1e-6
-        )
+    if arm != "bimanual":
+        assert np.isfinite(prior.nll(q)).all()
+        with np.load(out / "posture_ref.npz", allow_pickle=False) as z:
+            assert str(z["model"]) == "gmm" and int(z["n_joints"]) == 6
+            np.testing.assert_allclose(
+                z["gmm_prec_chol"], np.asarray(prior.precision_factors), rtol=1e-6
+            )
     before = (out / "checksums.json").read_bytes()
     train_arm(*args)
     assert before == (out / "checksums.json").read_bytes()
@@ -220,3 +229,29 @@ def test_cpu_training_exports_load_in_torch_and_jax_and_resume(tmp_path):
     train_arm(*args)
     np.testing.assert_allclose(load_encoder(out / "encoder.npz").latent_mean, encoder.latent_mean)
     assert json.loads((out / "progress.json").read_text())["phase"] == "complete"
+
+
+def test_bimanual_features_preserve_pairing_crop_windows_and_channel_order(tmp_path):
+    corpus = synthetic_corpus(tmp_path / "corpus")
+    caches = {
+        arm: FeatureCache(
+            prepare_features(corpus, arm, tmp_path / "features", crops=1, workers=1, max_length=70)
+        )
+        for arm in ("left", "right", "bimanual")
+    }
+    joint = caches["bimanual"]
+    assert joint.series.shape[-1] == 48
+    assert joint.metadata["targets"].shape[-1] == 183
+    for arm, offset in (("left", 0), ("right", 6)):
+        separate = caches[arm]
+        for field in ("episodes", "lengths", "sources", "splits"):
+            np.testing.assert_array_equal(joint.metadata[field], separate.metadata[field])
+        for derivative in range(4):
+            np.testing.assert_array_equal(
+                joint.series[..., 12 * derivative + offset : 12 * derivative + offset + 6],
+                separate.series[..., 6 * derivative : 6 * derivative + 6],
+            )
+    np.testing.assert_array_equal(
+        corpus.joint(0, "bimanual"),
+        np.concatenate([corpus.joint(0, a) for a in ("left", "right")], axis=1),
+    )

@@ -48,7 +48,9 @@ def export_posture(blob: dict, path: Path):
     )
 
 
-def write_checksums(root: Path):
-    files = ["encoder.pt", "encoder.npz", "posture_ref.npz", "posture_prior.npz"]
+def write_checksums(root: Path, *, encoder_only=False):
+    files = ["encoder.pt", "encoder.npz"]
+    if not encoder_only:
+        files += ["posture_ref.npz", "posture_prior.npz"]
     hashes = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in files}
     (root / "checksums.json").write_text(json.dumps(hashes, indent=2) + "\n")

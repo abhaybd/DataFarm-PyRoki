@@ -118,6 +118,18 @@ are framework-independent and match the original PyTorch scorer's layout.
 
 ## Artifacts
 
+An opt-in [bimanual experiment](bimanual_encoder.md) trains one synchronized
+12-joint motion encoder on the identical episodes and crop windows while
+retaining the existing separate posture priors:
+
+```sh
+uv run --extra training python scripts/train_yam.py --bimanual --gpu 3
+```
+
+It writes only encoder artifacts under `work/yam/models/bimanual/` (48 input
+channels, 183 fingerprint targets, 16 latent dimensions). Marginal artifacts
+and the default left/right training command are unchanged.
+
 Each arm's directory contains:
 
 | File | Consumer |

@@ -98,6 +98,34 @@ def test_explicit_joint_mapping():
         )
 
 
+def test_rejected_candidate_is_available_only_through_failure(encoder):
+    from datafarm_pyroki.integration import make_leg_solver
+
+    robot, _ = robot_fixture()
+    mapping = JointMap.from_names(robot.joints.actuated_names, encoder.spec.joint_names)
+
+    @jaxls.Cost.factory(kind="constraint_eq_zero")
+    def impossible_start(vals, var):
+        return vals[var] - 1.0
+
+    solver = make_leg_solver(
+        robot,
+        encoder,
+        joint_map=mapping,
+        source_dt=0.15,
+        timesteps=8,
+        encoder_weight=0,
+        max_iterations=2,
+        extra_costs=lambda points, context: [impossible_start(points[0])],
+    )
+    with pytest.raises(InfeasibleTrajectoryError, match="Constraint violation") as failure:
+        solver(jnp.zeros(7), jnp.zeros(7))
+    assert np.isfinite(failure.value.positions).all()
+    assert failure.value.max_constraint_violation > solver.constraint_tolerance
+    # Endpoint projection remains exact even on the rejected warm-start seed.
+    np.testing.assert_array_equal(np.asarray(failure.value.positions)[[0, -1]], np.zeros((2, 7)))
+
+
 def test_reusable_leg_solver_updates_task_context_without_retracing(encoder):
     from datafarm_pyroki.integration import make_leg_solver
 

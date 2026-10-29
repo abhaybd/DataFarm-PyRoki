@@ -1,4 +1,4 @@
-"""Prepare the balanced YAM corpus, then train both marginal models on one GPU.
+"""Prepare the balanced YAM corpus, then train marginal or bimanual models on one GPU.
 
 Run with the training extra installed. Logs go to stdout; pipeline.json tracks
 completion/failure independently of a terminal session. Re-running resumes work.
@@ -23,6 +23,11 @@ def main():
     p.add_argument("--gpu", type=int, default=3)
     p.add_argument("--data-workers", type=int, default=8)
     p.add_argument("--workers", type=int, default=16)
+    p.add_argument(
+        "--bimanual",
+        action="store_true",
+        help="Train a synchronized 12-joint encoder only; keep posture priors separate",
+    )
     a = p.parse_args()
     root = a.root.resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -63,7 +68,10 @@ def main():
             ],
         ),
     ]
-    with (root / "pipeline.lock").open("a") as lock:
+    if a.bimanual:
+        commands[-1][1].extend(["--arms", "bimanual"])
+    pipeline = "pipeline_bimanual" if a.bimanual else "pipeline"
+    with (root / f"{pipeline}.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         status = {
             "pid": os.getpid(),
@@ -72,18 +80,18 @@ def main():
         }
         for phase, command in commands:
             status.update(phase=phase, command=command)
-            atomic_json(root / "pipeline.json", status)
+            atomic_json(root / f"{pipeline}.json", status)
             print(f"[pipeline] {phase}: {' '.join(command)}", flush=True)
             try:
                 subprocess.run(command, check=True)
             except BaseException as exc:
                 atomic_json(
-                    root / "pipeline.json",
+                    root / f"{pipeline}.json",
                     dict(status, phase="failed", failed_phase=phase, error=str(exc)),
                 )
                 raise
         atomic_json(
-            root / "pipeline.json",
+            root / f"{pipeline}.json",
             dict(status, phase="complete", finished_at=datetime.now(timezone.utc).isoformat()),
         )
 
