@@ -100,7 +100,7 @@ def run(args, model, enabled):
         version=1,
         task="handoff_v2" if args.handoff else "independent",
         scene_sha256=hashlib.sha256((args.output / "scene.xml").read_bytes()).hexdigest(),
-        solver_iterations=180,
+        solver_iterations=320 if args.direct_transfers else 180,
         seed=args.seed,
         encoder_weight=args.encoder_weight if enabled else 0.0,
         retimed=retimed,
@@ -108,6 +108,8 @@ def run(args, model, enabled):
         retime_iterations=args.retime_iterations,
         models=hashes,
     )
+    if args.direct_transfers:
+        identity.update(direct_transfers=True, collision_geometry="mujoco_signed_distance_v2")
     if args.reuse_plan and plan_path.exists():
         metadata = json.loads(metadata_path.read_text())
         if metadata["identity"] != identity:
@@ -129,6 +131,7 @@ def run(args, model, enabled):
                 enabled=enabled,
                 seed=args.seed,
                 weight=args.encoder_weight,
+                direct=args.direct_transfers,
             )
             planners[arm] = planner
             if args.handoff:
@@ -179,6 +182,7 @@ def run(args, model, enabled):
         render=not args.no_render,
         targets=TARGETS,
         handoff=args.handoff,
+        direct=args.direct_transfers,
     )
     metrics["arms"] = {
         arm: dict(
@@ -218,6 +222,11 @@ def main():
         help="Transfer three cubes from the left side to the right via a physical handoff",
     )
     p.add_argument("--datafarm", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument(
+        "--direct-transfers",
+        action="store_true",
+        help="Drop approach/lift/place waypoints and optimize with scene geometry constraints",
+    )
     p.add_argument("--retime", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--reuse-plan", action="store_true")
     p.add_argument("--no-render", action="store_true")
@@ -232,6 +241,8 @@ def main():
     p.add_argument("--width", type=int, default=960)
     p.add_argument("--height", type=int, default=720)
     args = p.parse_args()
+    if args.direct_transfers and not args.handoff:
+        p.error("--direct-transfers requires --handoff")
     if args.fps <= 0 or min(args.width, args.height) < 320 or args.width % 2 or args.height % 2:
         p.error("Use positive fps and even image dimensions of at least 320 pixels")
     if args.retime_starts < 1 or args.retime_iterations < 1:
@@ -239,7 +250,14 @@ def main():
     if not np.isfinite(args.encoder_weight) or args.encoder_weight < 0:
         p.error("Encoder weight must be finite and nonnegative")
     args.output = (
-        args.output or Path("work/yam-handoff" if args.handoff else "work/yam-pick-place")
+        args.output
+        or Path(
+            "work/yam-handoff-direct"
+            if args.direct_transfers
+            else "work/yam-handoff"
+            if args.handoff
+            else "work/yam-pick-place"
+        )
     ).resolve()
     args.models = args.models.resolve()
     args.output.mkdir(parents=True, exist_ok=True)

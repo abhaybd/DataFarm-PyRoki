@@ -42,6 +42,8 @@ def plan_handoffs(planners, args, timeline_fn):
     """
     current = {arm: HOME.copy() for arm in ARMS}
     closed = {arm: False for arm in ARMS}
+    held = {arm: None for arm in ARMS}
+    direct = bool(getattr(args, "direct_transfers", False))
     chunks, timestamps, events, phases = [], [], [], []
     cursor = 0.0
     arm_retiming = {arm: [] for arm in ARMS}
@@ -56,10 +58,12 @@ def plan_handoffs(planners, args, timeline_fn):
                         0.02 if closed[arm] else 0.0475
                     )
 
-    def object_at(cube, xyz):
+    def object_at(cube, xyz, quaternion=None):
         for planner in planners.values():
             adr = planner.model.joint(f"cube{cube}_free").qposadr[0]
             planner.scratch.qpos[adr : adr + 3] = xyz
+            if quaternion is not None:
+                planner.scratch.qpos[adr + 3 : adr + 7] = quaternion
 
     def append(q, t):
         nonlocal cursor
@@ -83,13 +87,27 @@ def plan_handoffs(planners, args, timeline_fn):
                 else:
                     goal = planner.endpoint(xyz, current[arm], cube, orientation=orientation)
                 name = f"cube {cube + 1}: {description}"
+                if direct:
+                    planner.carried_cube = held[arm]
                 path = planner.leg(current[arm], goal, name, cube=cube, contact=track)
+                if direct and held[arm] is not None:
+                    # Carry ideal geometry between legs. Replay uses free cubes.
+                    planner.collisions.evaluate(path[-1], planner.last_collision_state)
+                    adr = planner.model.joint(f"cube{cube}_free").qposadr[0]
+                    pose = planner.collisions.data.qpos[adr : adr + 7].copy()
+                    object_at(cube, pose[:3], pose[3:])
                 steps.append(MotionLeg(path, 0.1, name))
                 current[arm] = goal
             timeline, records = timeline_fn(planner, steps, args)
             timelines[arm] = timeline
             arm_retiming[arm].extend(records)
             phase_records[arm] = dict(duration_s=float(timeline.times[-1]), retiming=records)
+            if direct:
+                phase_records[arm]["interpolated_minimum_geometry_distance_m"] = (
+                    planner.collisions.validate_path(
+                        timeline.positions, planner.last_collision_state
+                    )
+                )
         duration = max(float(t.times[-1]) for t in timelines.values())
         local = np.linspace(0, duration, int(np.ceil(duration / 0.02)) + 1)
         positions = []
@@ -121,6 +139,7 @@ def plan_handoffs(planners, args, timeline_fn):
 
     def grip(arm, action, cube, dwell, *, handoff=False):
         closed[arm] = action == "close"
+        held[arm] = cube if closed[arm] else None
         events.append(
             dict(time=cursor, command=dict(arm=arm, action=action, cube=cube, handoff=handoff))
         )
@@ -135,7 +154,7 @@ def plan_handoffs(planners, args, timeline_fn):
     for cube, (start, target) in enumerate(zip(STARTS, TARGETS, strict=True)):
         print(f"Planning synchronized handoff {cube + 1}/{len(STARTS)}", flush=True)
         right = []
-        if cube:
+        if cube and not direct:
             previous = TARGETS[cube - 1]
             right.append((np.r_[previous[:2], 0.14], DOWN, True, "receiver retreat"))
         right.append((ready, RECEIVE, False, "receiver ready"))
@@ -145,7 +164,9 @@ def plan_handoffs(planners, args, timeline_fn):
                 "left": [
                     (np.r_[start[:2], 0.14], DOWN, False, "giver approach"),
                     (start, DOWN, True, "giver descend"),
-                ],
+                ]
+                if not direct
+                else [(start, DOWN, False, "giver grasp directly")],
                 "right": right,
             },
             cube,
@@ -158,6 +179,8 @@ def plan_handoffs(planners, args, timeline_fn):
                     (np.r_[start[:2], 0.14], DOWN, True, "giver lift"),
                     (CENTER, PRESENT, False, "present for handoff"),
                 ]
+                if not direct
+                else [(CENTER, PRESENT, False, "present directly")]
             },
             cube,
         )
@@ -174,7 +197,9 @@ def plan_handoffs(planners, args, timeline_fn):
                     (ready, RECEIVE, True, "receiver clear center"),
                     (np.r_[target[:2], 0.14], DOWN, False, "receiver transport"),
                     (target, DOWN, True, "receiver lower"),
-                ],
+                ]
+                if not direct
+                else [(target, DOWN, False, "receiver places directly")],
             },
             cube,
         )
@@ -188,6 +213,8 @@ def plan_handoffs(planners, args, timeline_fn):
                 (np.r_[TARGETS[-1, :2], 0.14], DOWN, True, "final retreat"),
                 (None, None, False, "receiver return"),
             ]
+            if not direct
+            else [(None, None, False, "receiver return directly")]
         },
         last,
     )

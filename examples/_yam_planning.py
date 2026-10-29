@@ -34,7 +34,7 @@ def robot_contact(model, contact, allowed_cube=None):
 
 
 class Planner:
-    def __init__(self, model, urdf, arm, models, *, enabled, seed=7, weight=0.1):
+    def __init__(self, model, urdf, arm, models, *, enabled, seed=7, weight=0.1, direct=False):
         self.model, self.arm, self.enabled = model, arm, enabled
         self.scratch = initial_state(model, settle=False)
         self.robot = pk.Robot.from_urdf(yourdfpy.URDF.load(urdf), default_joint_cfg=HOME)
@@ -62,6 +62,12 @@ class Planner:
         self.ik = make_ik_solver(self.robot, "tcp", seed_weight=0.001, max_iterations=100)
         self.fk = jax.jit(self.robot.forward_kinematics)
         self.ik_records, self.leg_records = [], []
+        self.direct = direct
+        self.carried_cube = None
+        if direct:
+            from _yam_collision import SceneDistances
+
+            self.collisions = SceneDistances(model, arm)
         self._make_solvers(weight)
         for q in np.clip(HOME + rng.normal(size=(3, 6)) * 0.1, self.lower, self.upper):
             self.scratch.qpos[self.qpos] = q
@@ -87,7 +93,8 @@ class Planner:
             return 0.12 - robot.forward_kinematics(vals[var])[tcp, 6]
 
         def build(track):
-            def extra(points, targets):
+            def extra(points, context):
+                targets = context["targets"] if self.direct else context
                 variables = robot.joint_var_cls(jnp.arange(len(points)))
                 costs = [clearance(variables)]
                 if track:
@@ -101,8 +108,29 @@ class Planner:
                             jnp.full(len(points), 80.0),
                         )
                     )
-                else:
+                elif not self.direct:
                     costs.append(free_height(variables))
+                if self.direct:
+
+                    @jaxls.Cost.factory(kind="constraint_leq_zero", name="scene_geometry")
+                    def geometry(vals, a, b, u, state):
+                        q = (1 - u) * vals[a] + u * vals[b]
+                        return 10 * (self.collisions.margins - self.collisions.distance(q, state))
+
+                    # Endpoints plus three interior samples of every interval;
+                    # dense validation below checks the returned path again.
+                    index = np.repeat(np.arange(len(points) - 1), 4)
+                    blend = np.tile(np.array([0, 0.25, 0.5, 0.75]), len(points) - 1)
+                    index = np.r_[index, len(points) - 2]
+                    blend = np.r_[blend, 1.0]
+                    costs.append(
+                        geometry(
+                            robot.joint_var_cls(jnp.asarray(index)),
+                            robot.joint_var_cls(jnp.asarray(index + 1)),
+                            jnp.asarray(blend[:, None]),
+                            context["scene"][None],
+                        )
+                    )
                 return costs
 
             return make_leg_solver(
@@ -116,7 +144,7 @@ class Planner:
                 smoothness_weight=0.25,
                 acceleration_weight=0.0225,
                 extra_costs=extra,
-                max_iterations=180,
+                max_iterations=320 if self.direct else 180,
             )
 
         self.optimizers = {track: build(track) for track in (False, True)}
@@ -176,16 +204,29 @@ class Planner:
             (a @ jaxlie.SO3.exp(jnp.asarray(u[:, None]) * (a.inverse() @ b).log())).wxyz
         )
         targets[:, 4:] = endpoints[0, 4:] + u[:, None] * (endpoints[1, 4:] - endpoints[0, 4:])
+        context = jnp.asarray(targets)
+        if self.direct:
+            self.scratch.qpos[self.qpos] = start
+            state = self.collisions.context(
+                self.scratch, allowed_cube=cube, carried_cube=self.carried_cube
+            )
+            self.last_collision_state = state
+            context = dict(targets=jnp.asarray(targets), scene=jnp.asarray(state))
         q = np.asarray(
             self.optimizers[contact](
-                start, goal, initial_waypoints=initial, context=jnp.asarray(targets)
+                start, goal, initial_waypoints=initial, context=context
             ).positions
         ).copy()
         poses = np.asarray(self.fk(jnp.asarray(q)))[:, self.tcp]
         error = float(np.linalg.norm(poses[:, 4:] - targets[:, 4:], axis=-1).max())
         grid = np.linspace(0, len(q) - 1, 5 * (len(q) - 1) + 1)
         dense = np.stack([np.interp(grid, np.arange(len(q)), q[:, j]) for j in range(6)], axis=1)
-        if (contact and error > 0.015) or not all(self.valid(row, cube) for row in dense):
+        if self.direct:
+            distances = np.stack([self.collisions.evaluate(row, state)[0] for row in dense])
+            collision_valid = bool(np.all(distances >= -0.0005))
+        else:
+            collision_valid = all(self.valid(row, cube) for row in dense)
+        if (contact and error > 0.015) or not collision_valid:
             raise RuntimeError(
                 f"{self.arm}/{label}: rejected collision or contact tracking ({error:.4g} m)"
             )
@@ -197,6 +238,9 @@ class Planner:
             max_reference_deviation_m=error,
             planning_seconds=time.monotonic() - before,
         )
+        if self.direct:
+            record["minimum_geometry_distance_m"] = float(distances.min())
+            record["carried_cube"] = self.carried_cube
         self.leg_records.append(record)
         print(
             f"[{self.arm}] {label}: style {record['style_cost']:.2f}, "

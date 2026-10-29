@@ -111,7 +111,8 @@ def test_native_both_arm_fk_and_unattached_cubes(tmp_path):
             )
 
 
-def test_handoff_barriers_survive_unequal_arm_timing():
+@pytest.mark.parametrize("direct", [False, True])
+def test_handoff_barriers_survive_unequal_arm_timing(direct):
     from _yam_handoff import STARTS, TARGETS, plan_handoffs
     from _yam_scene import ARMS
 
@@ -129,6 +130,12 @@ def test_handoff_barriers_survive_unequal_arm_timing():
         return SimpleNamespace(qposadr=[index])
 
     model = SimpleNamespace(joint=joint)
+    labels = []
+
+    def leg(a, b, label, **kwargs):
+        labels.append(label)
+        return np.stack([a, b])
+
     planners = {
         arm: SimpleNamespace(
             arm=arm,
@@ -137,10 +144,18 @@ def test_handoff_barriers_survive_unequal_arm_timing():
             ik_records=[],
             leg_records=[],
             endpoint=lambda xyz, current, cube, orientation: np.r_[xyz, np.zeros(3)],
-            leg=lambda a, b, *args, **kwargs: np.stack([a, b]),
+            leg=leg,
         )
         for arm in ARMS
     }
+    if direct:
+        for planner in planners.values():
+            planner.collisions = SimpleNamespace(
+                evaluate=lambda *args: None,
+                validate_path=lambda *args: 0.0,
+                data=planner.scratch,
+            )
+            planner.last_collision_state = None
 
     def timeline(planner, steps, args):
         # Receiver is deliberately slower; all gripper events must wait for it.
@@ -150,9 +165,26 @@ def test_handoff_barriers_survive_unequal_arm_timing():
             times=np.array([0.0, duration]),
         ), []
 
-    q, t, events, records = plan_handoffs(planners, None, timeline)
+    q, t, events, records = plan_handoffs(
+        planners, SimpleNamespace(direct_transfers=direct), timeline
+    )
     assert q.shape[1] == 12 and np.all(np.diff(t) > 0)
     assert len(events) > 0
+    if direct:
+        assert not any(
+            suffix in label
+            for label in labels
+            for suffix in (
+                "giver approach",
+                "giver descend",
+                "giver lift",
+                "receiver transport",
+                "receiver lower",
+                "retreat",
+            )
+        )
+        assert sum("giver grasp directly" in label for label in labels) == 3
+        assert sum("receiver places directly" in label for label in labels) == 3
     for cube in range(3):
         commands = [e for e in events if e["command"].get("cube") == cube]
         assert [(e["command"]["arm"], e["command"]["action"]) for e in commands] == [

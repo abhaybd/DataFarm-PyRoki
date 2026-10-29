@@ -345,6 +345,11 @@ synchronized DataFarm off/on comparison video:
 MUJOCO_GL=egl uv run --extra planning --extra simulation python examples/yam_pick_place.py --handoff --compare
 ```
 
+Add `--direct-transfers` to remove pregrasp/lift/preplace/retreat waypoints and
+optimize direct motions with scene and carried-cube collision-distance constraints.
+This experiment writes to `work/yam-handoff-direct/`; the original handoff demo
+retains its own outputs.
+
 ```sh
 uv run --extra planning --extra simulation python examples/pick_place.py --compare
 ```

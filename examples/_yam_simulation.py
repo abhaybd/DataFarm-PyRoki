@@ -29,6 +29,7 @@ def annotate(
     count=4,
     handoffs=None,
     phase="",
+    direct=False,
 ):
     image = Image.fromarray(frame)
     draw = ImageDraw.Draw(image, "RGBA")
@@ -50,6 +51,8 @@ def annotate(
     subtitle = "BIMANUAL YAM  /  6 DoF per arm  /  independent 30 Hz models"
     if handoffs is not None:
         subtitle = "SOURCE → HANDOFF → TARGET  /  independent 30 Hz arm models"
+    if direct:
+        subtitle = "DIRECT GRASP / PLACE  ·  scene geometry constraints  ·  6 DoF arm models"
     draw.text(
         (42, 66),
         subtitle,
@@ -87,6 +90,7 @@ def simulate(
     render=True,
     targets=TARGETS,
     handoff=False,
+    direct=False,
 ):
     data = initial_state(model)
     count = len(targets)
@@ -148,7 +152,8 @@ def simulate(
                 continue
             names = [model.body(int(model.geom_bodyid[g])).name for g in (c.geom1, c.geom2)]
             cube = next((int(n[4:]) for n in names if n.startswith("cube")), None)
-            if robot_contact(model, c, cube):
+            allowed = cube if not direct or cube in held.values() else None
+            if robot_contact(model, c, allowed):
                 bad += 1
                 penetration = max(penetration, -float(c.dist))
                 if len(bad_examples) < 10:
@@ -193,6 +198,7 @@ def simulate(
             count=count,
             handoffs=int(released.sum()) if handoff else None,
             phase=phase,
+            direct=direct,
         )
 
     camera = mujoco.MjvCamera()

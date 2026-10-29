@@ -38,6 +38,32 @@ collision checks sample optimized paths densely. Synchronized playback then
 checks actual inter-arm, robot/table, and robot/object contacts. This is a local
 planner for this specified scene, not general obstacle search or task planning.
 
+To experiment with direct motions, without pregrasp, postgrasp lift, preplace,
+or postplace retreat waypoints:
+
+```sh
+MUJOCO_GL=egl uv run --extra planning --extra simulation python examples/yam_pick_place.py --handoff --direct-transfers --compare
+```
+
+This variant writes to `work/yam-handoff-direct/`. The grasp, handoff, and placement
+endpoints remain fixed, while the approach/transport path and orientation are free.
+It replaces the fixed transit-height constraint with signed-distance constraints
+using the scene's actual MuJoCo collision primitives, including fingers, wrist
+cameras, table, tray, other cubes, and the other arm's current configuration.
+Self collision has a 1 mm margin; block clearances use 20 mm to accommodate tracking
+and placement errors, and other robot clearances use 3 mm. A rigid planning
+transform carries the grasped cube, with separate payload/obstacle constraints;
+payload/table and payload/tray contact is permitted at zero clearance. Only closed
+fingers may contact the active cube. The optimizer checks waypoints and three
+interior samples per interval, followed by denser path checks. Both modes receive
+the same constraints and a 320-iteration budget. No fixed via pose is inserted to
+lift over an obstacle. The short acquisition/withdrawal legs and ownership barriers
+at the handoff remain. Simulation still uses only physical free-body grasps.
+
+These are local, sampled geometry constraints, rather than a continuous collision
+certificate or a global obstacle-search planner. Concurrent arms are checked
+together during physical replay; each arm's solve treats the other as stationary.
+
 The single-arm timing API is applied separately to each marginal model within
 each shared phase. The phase lasts until both arms finish, then its gripper
 events execute; an arm that finishes early holds position. Retiming therefore
